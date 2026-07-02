@@ -88,7 +88,7 @@ OTC_FUND = {
     "515790": ("012680", "华泰柏瑞光伏ETF联接C"),
     "512980": ("004753", "广发传媒ETF联接C"),
     "512660": ("005693", "广发军工ETF联接C"),
-    "159869": ("012729", "国泰动漫游戏ETF联接C"),
+    "159869": ("012769", "华夏中证动漫游戏ETF联接C"),
     "512580": ("002984", "广发环保ETF联接C"),
     "513180": ("013403", "华夏恒生科技ETF联接C"),
     "510880": ("012762", "华泰柏瑞红利ETF联接C"),
@@ -747,12 +747,28 @@ def check_holdings(df: pd.DataFrame) -> list:
                 "建议": "已进入利润保护区，开始盯MA5/MA10是否转弱",
             })
         elif cur_status == "✗ 趋势偏弱" or cur_rank >= 5:
-            alerts.append({
-                "基金": fund, "ETF": name, "级别": "🔴 止损",
-                "信号变化": f"{buy_status} → {cur_status}",
-                "距MA50": dist_str,
-                "建议": "趋势走坏，建议止损",
-            })
+            # 状态转弱不等于要立刻割：区分"真破位"和"浅回踩/缩量假摔"。
+            # 真止损需要确认——明显跌破MA50，或放量跌破；否则只是刚破线，先观察。
+            vol_ratio = float(row.get("量比", 0) or 0)
+            confirmed_breakdown = (
+                cur_rank > 5                                # 状态异常/未知，保守止损
+                or dist_val <= -3                           # 已明显跌破MA50(超3%)
+                or (dist_val < 0 and vol_ratio >= 1.5)      # 放量跌破MA50
+            )
+            if confirmed_breakdown:
+                alerts.append({
+                    "基金": fund, "ETF": name, "级别": "🔴 止损",
+                    "信号变化": f"{buy_status} → {cur_status}",
+                    "距MA50": dist_str,
+                    "建议": "趋势走坏(明显跌破MA50或放量破位)，建议止损",
+                })
+            else:
+                alerts.append({
+                    "基金": fund, "ETF": name, "级别": "🟠 止损观察",
+                    "信号变化": f"{buy_status} → {cur_status}",
+                    "距MA50": dist_str,
+                    "建议": "刚跌破MA50但幅度浅且缩量，先观察；跌破关键支撑或放量下跌再止损",
+                })
         elif cur_status == "- 趋势完好":
             alerts.append({
                 "基金": fund, "ETF": name, "级别": "🟡 关注",

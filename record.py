@@ -44,27 +44,42 @@ def _migrate_fields(records: list) -> list:
 
 
 def _backfill_nav(records: list) -> bool:
-    """回填缺失净值和金额的卖出记录（有份额但缺净值，且日期已过）"""
+    """回填缺失净值的记录（交易日已过、场外基金）。
+
+    - 卖出：有份额但缺净值/金额 → 补净值并回算金额(份额×净值)
+    - 买入/定投：缺净值 → 仅补净值(金额是用户输入，不覆盖)
+    """
     from datetime import datetime
     today = datetime.now().strftime("%Y-%m-%d")
     changed = False
     for r in records:
-        if r.get("类型") != "卖出":
+        typ = r.get("类型", "买入")
+        if typ == "清仓":
             continue
-        if not r.get("份额") or r.get("份额", 0) <= 0:
-            continue
-        if r.get("净值") and r.get("金额"):
+        # 已有净值则跳过
+        if r.get("净值"):
             continue
         trade_date = (r.get("时间") or "")[:10]
+        # 场外净值 T+1，交易日当天/未来查不到，需已过
         if not trade_date or trade_date >= today:
             continue
         fund_code = r.get("基金代码", r.get("ETF代码"))
+        etf_code = r.get("ETF代码")
+        # 场内直投(基金代码==ETF代码)无场外净值可查，跳过
+        if fund_code == etf_code:
+            continue
         nav = _query_nav(fund_code, trade_date)
-        if nav and nav > 0:
-            r["净值"] = nav
-            r["金额"] = round(r["份额"] * nav, 2)
-            changed = True
-            print(f"  📝 自动回填: {r.get('ETF名称')} {trade_date} 净值={nav} 金额={r['金额']:.0f}元")
+        if not (nav and nav > 0):
+            continue
+        r["净值"] = nav
+        if typ == "卖出":
+            # 卖出按份额回算金额
+            if r.get("份额") and r.get("份额", 0) > 0 and not r.get("金额"):
+                r["金额"] = round(r["份额"] * nav, 2)
+            print(f"  📝 自动回填: {r.get('ETF名称')} {trade_date} 净值={nav} 金额={r.get('金额', 0):.0f}元")
+        else:
+            print(f"  📝 自动回填: {r.get('ETF名称')} {trade_date} 净值={nav}")
+        changed = True
     return changed
 
 
@@ -85,7 +100,7 @@ def _load_records(path: Path = RECORDS_PATH) -> list:
         if records and "买入金额" in records[0]:
             records = _migrate_fields(records)
             _save_records(records, path)
-        # 自动回填缺失的卖出净值和金额
+        # 自动回填缺失净值(买入/卖出/定投，交易日已过的场外基金)
         if _backfill_nav(records):
             _save_records(records, path)
         return records

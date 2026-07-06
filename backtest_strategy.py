@@ -11,10 +11,10 @@ ROOT = Path(__file__).parent
 LOG_DIR = ROOT / "logs"
 OUT_DIR = LOG_DIR / "strategy_backtest"
 
-BUY_STATUS = "★ 买入信号"
-FOLLOW_STATUS = "◆ 趋势持有"
+BUY_STATUS = "★ 低位确认"
+FOLLOW_STATUS = "◆ 趋势跟随"
 WEAK_STATUS = "✗ 趋势偏弱"
-TP_STATUSES = {"◆ 趋势持有", "◇ 多头排列", "- 趋势完好", "▲ 接近支撑"}
+TP_STATUSES = {"◆ 趋势跟随", "◇ 多头排列", "- 趋势完好", "▲ 接近支撑"}
 BUY_WEIGHTS = {BUY_STATUS: 1.0, FOLLOW_STATUS: 0.5}
 
 
@@ -119,8 +119,11 @@ def analyze_hist(symbol: str, name: str, as_of_date: str) -> dict:
     va20 = vol_avg20.iloc[-1]
 
     recent_low_5d = close.tail(5).min()
+    recent_low_10d = close.tail(10).min()
     support_tested = recent_low_5d <= m50 * 1.015
+    support_recent_10d = recent_low_10d <= m50 * 1.02
     ma5_up = ma5.iloc[-1] > ma5.iloc[-2] and ma5.iloc[-2] > ma5.iloc[-3]
+    ma20_up = ma20.iloc[-1] > ma20.iloc[-2] and ma20.iloc[-2] > ma20.iloc[-3]
     vol_ratio = round(vol / va20, 2) if pd.notna(va20) and va20 > 0 else 0
     dist_ma50_pct = round((c - m50) / m50 * 100, 2)
 
@@ -128,6 +131,7 @@ def analyze_hist(symbol: str, name: str, as_of_date: str) -> dict:
         return {"代码": symbol, "名称": name, "状态": "⚠ 数据异常(价格偏离MA5超30%)"}
 
     above_long = c > m50 and c > m100
+    above_mid = c > m50
     bull_align = c > m5 and c > m10 and c > m20 and above_long
     ma50_slope = (ma50.iloc[-1] - ma50.iloc[-10]) / ma50.iloc[-10] * 100
 
@@ -141,11 +145,12 @@ def analyze_hist(symbol: str, name: str, as_of_date: str) -> dict:
     )
 
     breakout = ""
+    days_below = 0
     recent_closes = close.iloc[-6:-1]
     recent_ma50 = ma50.iloc[-6:-1]
-    if above_long and len(recent_closes) >= 5 and len(recent_ma50) >= 5:
+    if len(recent_closes) >= 5 and len(recent_ma50) >= 5:
         days_below = int((recent_closes < recent_ma50).sum())
-        if days_below >= 3:
+        if above_long and days_below >= 3:
             breakout = f"⬆ 突破({days_below}/5日在MA50下)"
 
     entry_dist_cap = 4.5
@@ -158,12 +163,61 @@ def analyze_hist(symbol: str, name: str, as_of_date: str) -> dict:
         and trend_ready
         and (m5 > m10 > m20 or executable_breakout)
     )
+    trend_follow_ready = (
+        buy_core
+        and m20 > m50 > m100
+        and 0.85 <= vol_ratio <= 1.8
+        and (
+            (m20 / m50 - 1) * 100 >= 0.5
+            or dist_ma50_pct <= 2.5
+        )
+    )
+    early_reversal_follow = (
+        above_mid
+        and not above_long
+        and support_tested
+        and support_recent_10d
+        and ma5_up
+        and ma20_up
+        and c > m5 and c > m10 and c > m20
+        and m5 > m10 > m20
+        and 0.85 <= vol_ratio <= 1.8
+        and dist_ma50_pct <= 6.5
+        and -1.8 < ma50_slope <= 0
+        and c >= m100 * 0.995
+        and days_below >= 3
+    )
+    early_bull_follow = (
+        bull_align
+        and support_recent_10d
+        and ma5_up
+        and ma20_up
+        and m5 > m10 > m20
+        and 0.85 <= vol_ratio <= 1.6
+        and 4.5 <= dist_ma50_pct <= 6.5
+        and c <= m100 * 1.03
+        and -1.2 < ma50_slope <= 0
+    )
+    early_reversal_watch = (
+        above_mid
+        and not above_long
+        and support_recent_10d
+        and ma5_up
+        and ma20_up
+        and c > m5 and c > m10
+        and m5 > m10 > m20
+        and 0.8 <= vol_ratio <= 1.8
+        and dist_ma50_pct <= 5.0
+        and -1.8 < ma50_slope <= 0
+    )
     near_support = above_long and dist_ma50_pct <= 5.0 and c < m20
 
     if strict_buy:
-        status = "★ 买入信号"
-    elif buy_core:
-        status = "◆ 趋势持有"
+        status = "★ 低位确认"
+    elif trend_follow_ready or early_reversal_follow or early_bull_follow:
+        status = "◆ 趋势跟随"
+    elif early_reversal_watch:
+        status = "- 趋势完好"
     elif near_support:
         status = "▲ 接近支撑"
     elif bull_align:
@@ -349,7 +403,7 @@ def write_report(history: pd.DataFrame, trades: pd.DataFrame) -> Path:
     lines = [
         "# Strategy Backtest",
         "",
-        "- Buy rule: current `scan.py` opens on `★ 买入信号` (1.0x) and `◆ 趋势持有` (0.5x)",
+        "- Buy rule: current `scan.py` opens on `★ 低位确认` (1.0x) and `◆ 趋势跟随` (0.5x)",
         "- Exit rule: first `✗ 趋势偏弱` or first structural `take_profit` trigger",
         "- Open trades are marked to market with the latest available scan date",
         "",

@@ -2,11 +2,12 @@
 Argus - ETF 均线信号扫描器
 
 扫描 ETF 池，按均线+量价信号分类：
-  ★ 买入信号：低位主买点，可正常建仓
+  ★ 低位确认：低位主买点，可正常建仓
               回踩MA50确认(近5日) → MA20站上MA50 → MA5/10/20较顺
               温和放量 + MA50上行，且距MA50较近(默认<4.5%)
-  ◆ 趋势持有：小仓跟随信号，可轻仓参与
-              技术面基本达标，但已脱离最佳低位或仍属突破初段 → 持有为主，不重仓追新
+  ◆ 趋势跟随：趋势延续型买点，可轻仓参与
+              技术面基本达标但不属最佳低位，或处于强势反转早期
+              空仓可轻仓试建，持仓继续拿，不重仓追新
   ▲ 接近支撑：短期均线压制 + 中期均线支撑（关注回调机会）
   ◇ 多头排列：趋势健康，持有为主
 
@@ -415,8 +416,11 @@ def analyze(symbol: str, name: str, as_of_date: str = None,
         # 回踩确认：只认"近5日"曾贴近MA50。10日窗口会把"十天前贴MA50、
         # 现已拉飞+20%"的票误判成"刚回踩"，导致追涨被标成买入。收紧到5日。
         recent_low_5d = close.tail(5).min()
+        recent_low_10d = close.tail(10).min()
         support_tested = recent_low_5d <= m50 * 1.015
+        support_recent_10d = recent_low_10d <= m50 * 1.02
         ma5_up = ma5.iloc[-1] > ma5.iloc[-2] and ma5.iloc[-2] > ma5.iloc[-3]
+        ma20_up = ma20.iloc[-1] > ma20.iloc[-2] and ma20.iloc[-2] > ma20.iloc[-3]
         vol_ratio = round(vol / va20, 2) if pd.notna(va20) and va20 > 0 else 0
         dist_ma50_pct = round((c - m50) / m50 * 100, 2)
 
@@ -426,6 +430,7 @@ def analyze(symbol: str, name: str, as_of_date: str = None,
 
         # ========== 分类 ==========
         above_long = c > m50 and c > m100
+        above_mid = c > m50
         bull_align = c > m5 and c > m10 and c > m20 and above_long
 
         # MA50近10日斜率
@@ -442,17 +447,23 @@ def analyze(symbol: str, name: str, as_of_date: str = None,
         )
         # ========== 突破提醒 ==========
         breakout = ""
-        if above_long:
-            recent_closes = close.iloc[-6:-1]   # 前5个交易日(不含今天)
-            recent_ma50 = ma50.iloc[-6:-1]
-            if len(recent_closes) >= 5 and len(recent_ma50) >= 5:
-                days_below = int((recent_closes < recent_ma50).sum())
-                if days_below >= 3:
-                    breakout = f"⬆ 突破({days_below}/5日在MA50下)"
+        days_below = 0
+        recent_closes = close.iloc[-6:-1]   # 前5个交易日(不含今天)
+        recent_ma50 = ma50.iloc[-6:-1]
+        if len(recent_closes) >= 5 and len(recent_ma50) >= 5:
+            days_below = int((recent_closes < recent_ma50).sum())
+            if above_long and days_below >= 3:
+                breakout = f"⬆ 突破({days_below}/5日在MA50下)"
 
         # ★ 保留低位主买点；◆ 则作为小仓可执行的趋势跟随信号。
-        # 这样既过滤5月那类偏激进的追涨买点，也保留6月中旬那种整理后
-        # 继续走强的趋势机会。
+        # 历史样本里拖后腿的◆，大多是 MA20 尚未稳稳站上 MA50，
+        # 或 MA20 只是刚刚贴着 MA50，趋势结构还太脆。这里把◆收紧为：
+        # 1) 中长期结构至少满足 MA20 > MA50 > MA100
+        # 2) MA20 相对 MA50 至少留出一层最小安全垫
+        # 3) 但若价格本身就紧贴 MA50，可放宽成“近轴跟随”
+        # 早期右侧跟随用于处理刚站回MA50、但MA100仍略有压制的票。
+        # 这类票不能等到完全多头后才承认，但必须要求短中期结构
+        # 明确走强，且价格已经逼近MA100。
         ENTRY_DIST_CAP = 4.5
         trend_ready = m20 > m50 and ma50_slope > 0.1
         executable_breakout = breakout != ""
@@ -463,13 +474,61 @@ def analyze(symbol: str, name: str, as_of_date: str = None,
             and trend_ready
             and (m5 > m10 > m20 or executable_breakout)
         )
-
+        trend_follow_ready = (
+            buy_core
+            and m20 > m50 > m100
+            and 0.85 <= vol_ratio <= 1.8
+            and (
+                (m20 / m50 - 1) * 100 >= 0.5
+                or dist_ma50_pct <= 2.5
+            )
+        )
+        early_reversal_follow = (
+            above_mid
+            and not above_long
+            and support_tested
+            and support_recent_10d
+            and ma5_up
+            and ma20_up
+            and c > m5 and c > m10 and c > m20
+            and m5 > m10 > m20
+            and 0.85 <= vol_ratio <= 1.8
+            and dist_ma50_pct <= 6.5
+            and -1.8 < ma50_slope <= 0
+            and c >= m100 * 0.995
+            and days_below >= 3
+        )
+        early_bull_follow = (
+            bull_align
+            and support_recent_10d
+            and ma5_up
+            and ma20_up
+            and m5 > m10 > m20
+            and 0.85 <= vol_ratio <= 1.6
+            and 4.5 <= dist_ma50_pct <= 6.5
+            and c <= m100 * 1.03
+            and -1.2 < ma50_slope <= 0
+        )
+        early_reversal_watch = (
+            above_mid
+            and not above_long
+            and support_recent_10d
+            and ma5_up
+            and ma20_up
+            and c > m5 and c > m10
+            and m5 > m10 > m20
+            and 0.8 <= vol_ratio <= 1.8
+            and dist_ma50_pct <= 5.0
+            and -1.8 < ma50_slope <= 0
+        )
         near_support = above_long and dist_ma50_pct <= 5.0 and c < m20
 
         if strict_buy:
-            status = "★ 买入信号"
-        elif buy_core:
-            status = "◆ 趋势持有"
+            status = "★ 低位确认"
+        elif trend_follow_ready or early_reversal_follow or early_bull_follow:
+            status = "◆ 趋势跟随"
+        elif early_reversal_watch:
+            status = "- 趋势完好"
         elif near_support:
             status = "▲ 接近支撑"
         elif bull_align:
@@ -498,7 +557,7 @@ def analyze(symbol: str, name: str, as_of_date: str = None,
         # ========== 买入信号可信度评估 ==========
         assess = ""
         risk_tier = ""
-        if status in ("★ 买入信号", "◆ 趋势持有"):
+        if status in ("★ 低位确认", "◆ 趋势跟随"):
             score = 0
             warns = []
 
@@ -605,7 +664,7 @@ def analyze(symbol: str, name: str, as_of_date: str = None,
 
 
 STATUS_ORDER = [
-    "★ 买入信号", "◆ 趋势持有", "▲ 接近支撑",
+    "★ 低位确认", "◆ 趋势跟随", "▲ 接近支撑",
     "◇ 多头排列", "- 趋势完好", "✗ 趋势偏弱",
 ]
 
@@ -707,14 +766,14 @@ def check_holdings(df: pd.DataFrame) -> list:
         # 止盈 = 结构已转弱，需要兑现利润。
         take_profit_watch = (
             dist_val >= 8
-            and cur_status in ("◆ 趋势持有", "◇ 多头排列", "- 趋势完好", "▲ 接近支撑")
+            and cur_status in ("◆ 趋势跟随", "◇ 多头排列", "- 趋势完好", "▲ 接近支撑")
         )
         take_profit_soft = (
             dist_val >= 8
             and ma5 > 0
             and price < ma5
             and row.get("MA5拐头") == "↓"
-            and cur_status in ("◆ 趋势持有", "◇ 多头排列", "- 趋势完好", "▲ 接近支撑")
+            and cur_status in ("◆ 趋势跟随", "◇ 多头排列", "- 趋势完好", "▲ 接近支撑")
         )
         take_profit_hard = (
             dist_val >= 10
@@ -776,7 +835,7 @@ def check_holdings(df: pd.DataFrame) -> list:
                 "距MA50": dist_str,
                 "建议": "趋势转弱，密切关注",
             })
-        elif cur_status == "★ 买入信号":
+        elif cur_status == "★ 低位确认":
             # 加仓风险等级
             if dist_val < 5:
                 tier = "低位"
@@ -788,16 +847,16 @@ def check_holdings(df: pd.DataFrame) -> list:
                 "基金": fund, "ETF": name, "级别": "🟢 加仓",
                 "信号变化": f"{buy_status} → {cur_status}",
                 "距MA50": dist_str, "风险等级": tier,
-                "建议": f"买入信号确认，可加仓 [{tier}]",
+                "建议": f"低位确认，可加仓 [{tier}]",
             })
-        elif cur_status == "◆ 趋势持有":
+        elif cur_status == "◆ 趋势跟随":
             # 技术面仍好但已脱离低位 → 持有兑现，不追高加仓
             tier = "追涨" if dist_val < 10 else "高位博弈"
             alerts.append({
                 "基金": fund, "ETF": name, "级别": "🔵 持有",
                 "信号变化": f"{buy_status} → {cur_status}",
                 "距MA50": dist_str, "风险等级": tier,
-                "建议": f"趋势延续，持有为主，已{tier}不建议追高加仓",
+                "建议": f"趋势跟随阶段，持有为主，已{tier}不建议追高加仓",
             })
         elif cur_status == "◇ 多头排列":
             if dist_val < 5:
@@ -1116,7 +1175,7 @@ def main():
         print(f"\n{'='*60}")
         print(f"  {status_label}  ({len(group)}只)")
         print(f"{'='*60}")
-        cols = valid_cols if status_label in ("★ 买入信号", "◆ 趋势持有") else [
+        cols = valid_cols if status_label in ("★ 低位确认", "◆ 趋势跟随") else [
             c for c in valid_cols if c not in ("信号评估", "场外基金")]
         # "试探"列只在"接近支撑"分组显示
         if status_label != "▲ 接近支撑":
@@ -1143,7 +1202,7 @@ def main():
     print(f"  扫描: {len(df)}  成功: {ok}  异常: {len(df)-ok}")
     probe_str = f"  ◆试探: {probe_count}" if probe_count > 0 else ""
     breakout_str = f"  ⬆突破: {breakout_count}" if breakout_count > 0 else ""
-    print(f"  ★买入: {counts['★ 买入信号']}  ◆持有: {counts['◆ 趋势持有']}  "
+    print(f"  ★低位: {counts['★ 低位确认']}  ◆跟随: {counts['◆ 趋势跟随']}  "
           f"▲支撑: {counts['▲ 接近支撑']}  "
           f"◇多头: {counts['◇ 多头排列']}{probe_str}{breakout_str}")
     print()
@@ -1310,7 +1369,7 @@ def save_xhs_log(df: pd.DataFrame, counts: dict, holding_alerts: list = None, co
     lines = []
 
     # 标题
-    buy_count = counts["★ 买入信号"]
+    buy_count = counts["★ 低位确认"] + counts["◆ 趋势跟随"]
     time_tag = "盘中信号" if _is_trading_hours() else "盘后复盘"
     if buy_count > 0:
         lines.append(f"🚨 今日ETF扫描｜{buy_count}只出买入信号！速看 {today}")
@@ -1322,8 +1381,8 @@ def save_xhs_log(df: pd.DataFrame, counts: dict, holding_alerts: list = None, co
     lines.append(f"🔭 Argus 扫描了 {total} 只ETF，成功 {ok} 只")
     lines.append("")
     lines.append("📋 信号分布：")
-    lines.append(f"★ 买入信号：{counts['★ 买入信号']} 只")
-    lines.append(f"◆ 趋势持有：{counts['◆ 趋势持有']} 只")
+    lines.append(f"★ 低位确认：{counts['★ 低位确认']} 只")
+    lines.append(f"◆ 趋势跟随：{counts['◆ 趋势跟随']} 只")
     lines.append(f"▲ 接近支撑：{counts['▲ 接近支撑']} 只")
 
     lines.append(f"◇ 多头排列：{counts['◇ 多头排列']} 只")
@@ -1332,10 +1391,10 @@ def save_xhs_log(df: pd.DataFrame, counts: dict, holding_alerts: list = None, co
     lines.append("")
 
     # 买入信号详情
-    buy = df[df["状态"] == "★ 买入信号"]
+    buy = df[df["状态"] == "★ 低位确认"]
     if not buy.empty:
         lines.append("—" * 20)
-        lines.append("🔥 买入信号详情：")
+        lines.append("🔥 低位确认：")
         lines.append("")
         for _, row in buy.iterrows():
             assess = row.get("信号评估", "")
@@ -1352,11 +1411,11 @@ def save_xhs_log(df: pd.DataFrame, counts: dict, holding_alerts: list = None, co
                 lines.append(f"   👉 场外基金: {otc}")
             lines.append("")
 
-    # 趋势持有（技术面达标但已脱离低位/结构未完全理顺，持有不追新）
-    hold = df[df["状态"] == "◆ 趋势持有"]
+    # 趋势跟随（非最佳低位，但技术面已可轻仓参与）
+    hold = df[df["状态"] == "◆ 趋势跟随"]
     if not hold.empty:
         lines.append("—" * 20)
-        lines.append("◆ 趋势持有（技术面达标但已脱离低位或结构未完全理顺，持有为主、不追新）：")
+        lines.append("◆ 趋势跟随（趋势延续型买点，空仓可轻仓试建，持仓继续拿）：")
         for _, row in hold.iterrows():
             tier = row.get("风险等级", "")
             tier_tag = f" [{tier}]" if tier else ""
@@ -1459,7 +1518,8 @@ def save_xhs_log(df: pd.DataFrame, counts: dict, holding_alerts: list = None, co
     # 尾部
     lines.append("—" * 20)
     lines.append("📌 信号说明：")
-    lines.append("★ 回踩MA50确认+放量站回短期均线+MA5拐头")
+    lines.append("★ 低位确认：回踩MA50确认+放量站回短期均线+MA5拐头")
+    lines.append("◆ 趋势跟随：右侧跟随或强势反转早期，可轻仓参与")
     lines.append("◇ 价格在所有均线之上，趋势健康")
     lines.append("⚠️ 仅供参考，不构成投资建议")
     lines.append("")
@@ -1514,8 +1574,8 @@ def notify_feishu(df: pd.DataFrame, counts: dict, compare_report: bool = False,
             "text": {
                 "tag": "lark_md",
                 "content": (
-                    f"**★ 买入 {counts['★ 买入信号']}**  |  "
-                    f"◆ 持有 {counts['◆ 趋势持有']}  |  "
+                    f"**★ 低位 {counts['★ 低位确认']}**  |  "
+                    f"◆ 跟随 {counts['◆ 趋势跟随']}  |  "
                     f"▲ 支撑 {counts['▲ 接近支撑']}  |  "
                     f"◇ 多头 {counts['◇ 多头排列']}  |  "
                     f"- 完好 {counts['- 趋势完好']}  |  "
@@ -1526,7 +1586,7 @@ def notify_feishu(df: pd.DataFrame, counts: dict, compare_report: bool = False,
         })
 
         # 买入信号详情
-        buy = df[df["状态"] == "★ 买入信号"]
+        buy = df[df["状态"] == "★ 低位确认"]
         if not buy.empty:
             elements.append({"tag": "hr"})
             for _, row in buy.iterrows():
@@ -1546,11 +1606,11 @@ def notify_feishu(df: pd.DataFrame, counts: dict, compare_report: bool = False,
                     "text": {"tag": "lark_md", "content": md},
                 })
 
-        # 趋势持有（达标但已脱离低位/结构未完全理顺，持有不追新）
-        hold = df[df["状态"] == "◆ 趋势持有"]
+        # 趋势跟随（非最佳低位，但技术面已可轻仓参与）
+        hold = df[df["状态"] == "◆ 趋势跟随"]
         if not hold.empty:
             elements.append({"tag": "hr"})
-            hlines = ["**◆ 趋势持有**（达标但已脱离低位或结构未完全理顺，持有为主·不追新）"]
+            hlines = ["**◆ 趋势跟随**（趋势延续型买点，空仓可轻仓试建）"]
             for _, row in hold.iterrows():
                 tier = row.get("风险等级", "")
                 tier_tag = f"  [{tier}]" if tier else ""

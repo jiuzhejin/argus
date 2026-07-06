@@ -24,14 +24,14 @@ OUT_DIR = LOG_DIR / "intraday_review"
 MERGED_OUT_DIR = LOG_DIR / "signal_review_merged"
 
 STATUS_ORDER = [
-    "★ 买入信号",
-    "◆ 趋势持有",
+    "★ 低位确认",
+    "◆ 趋势跟随",
     "▲ 接近支撑",
     "◇ 多头排列",
     "- 趋势完好",
     "✗ 趋势偏弱",
 ]
-BUY_STATUSES = {"★ 买入信号", "◆ 趋势持有"}
+BUY_STATUSES = {"★ 低位确认", "◆ 趋势跟随"}
 WEAK_STATUS = "✗ 趋势偏弱"
 
 STATUS_PATTERN = re.compile("|".join(re.escape(s) for s in sorted(STATUS_ORDER, key=len, reverse=True)))
@@ -578,7 +578,7 @@ def write_report(df: pd.DataFrame, events_df: pd.DataFrame, summary_df: pd.DataF
     lines.append("# Intraday signal review")
     lines.append("")
     lines.append(f"- Coverage: `{start}` to `{end}`, `{total_logs}` trading snapshots, `{total_etfs}` ETFs")
-    lines.append("- Buy event: first day entering `★ 买入信号` or `◆ 趋势持有`")
+    lines.append("- Buy event: first day entering `★ 低位确认` or `◆ 趋势跟随`")
     lines.append("- Sell event: explicit `🔴 止损`; if absent after a buy, first day falling into `✗ 趋势偏弱` is marked as proxy sell")
     lines.append("- Evaluation rule:")
     lines.append("  - Buy `有效`: 5-day return > 0; `存疑`: 5-day return <= 0 but max gain within 5 days > 0; `失效`: max gain within 5 days <= 0")

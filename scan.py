@@ -2,14 +2,17 @@
 Argus - ETF 均线信号扫描器
 
 扫描 ETF 池，按均线+量价信号分类：
-  ★ 低位确认：低位主买点，可正常建仓
+  ★ 低位确认：低位主买点，可先买一点
               回踩MA50确认(近5日) → MA20站上MA50 → MA5/10/20较顺
               温和放量 + MA50上行，且距MA50较近(默认<4.5%)
-  ◆ 趋势跟随：趋势延续型买点，可轻仓参与
+  ◇ 转强初期：MA50/MA100下方的早期转强，可少量参与
+              MA5>MA10>MA20 且短线继续走强，但中期趋势尚未完全扭转
+              用来承认“可以先买一点看看”，不是确认型买点
+  ◆ 趋势跟随：趋势延续型买点，可继续少量参与
               技术面基本达标但不属最佳低位，或处于强势反转早期
-              空仓可轻仓试建，持仓继续拿，不重仓追新
+              可以继续少量参与，已有持仓则继续拿，不在高位追加太多
   ▲ 接近支撑：短期均线压制 + 中期均线支撑（关注回调机会）
-  ◇ 多头排列：趋势健康，持有为主
+  □ 多头排列：趋势健康，持有为主
 
 用法:
   .venv/bin/python scan.py              # 扫描全部
@@ -24,6 +27,7 @@ Argus - ETF 均线信号扫描器
 import argparse
 import io
 import os
+import subprocess
 import sys
 import time
 from datetime import datetime, timedelta
@@ -94,6 +98,8 @@ OTC_FUND = {
     "513180": ("013403", "华夏恒生科技ETF联接C"),
     "510880": ("012762", "华泰柏瑞红利ETF联接C"),
     "512890": ("007467", "华泰柏瑞红利低波ETF联接C"),
+    "159611": ("016186", "广发中证全指电力ETF联接C"),
+    "512620": ("010770", "天弘中证农业主题ETF联接C"),
     "562500": ("018345", "华夏中证机器人ETF联接C"),
 }
 
@@ -137,53 +143,63 @@ FUND_TO_ETF.update({
     "013402": "513180",  # 华夏恒生科技ETF联接A
     "012761": "510880",  # 华泰柏瑞红利ETF联接A
     "007466": "512890",  # 华泰柏瑞红利低波ETF联接A
+    "016185": "159611",  # 广发中证全指电力ETF联接A
+    "010769": "512620",  # 天弘中证农业主题ETF联接A
     "018344": "562500",  # 华夏中证机器人ETF联接A
 })
 
 # ETF代码 → 名称
 ETF_NAME = {}  # 在 ETF_POOL 定义后填充
 
-# ===== ETF 池 =====
-ETF_POOL = [
-    # 宽基
-    ("510300", "沪深300ETF"),
-    ("510500", "中证500ETF"),
-    ("512100", "中证1000ETF"),
-    ("159915", "创业板ETF"),
-    ("588000", "科创50ETF"),
-    # 科技
-    ("512480", "半导体ETF"),
-    ("159995", "芯片ETF"),
-    ("515880", "通信ETF"),
-    # ("515050", "5GETF"),  # 数据源成交量单位异常，暂时排除
-    ("562800", "稀有金属ETF"),
-    ("515070", "人工智能ETF"),
-    # 消费/医药
-    ("512010", "医药ETF"),
-    ("512690", "酒ETF"),
-    ("516110", "汽车ETF"),
-    # 金融/地产
-    ("512800", "银行ETF"),
-    ("512880", "证券ETF"),
-    ("512200", "房地产ETF"),
-    # 周期/资源
-    ("512400", "有色金属ETF"),
-    ("517520", "黄金股ETF"),
-    ("516160", "新能源ETF"),
-    ("515790", "光伏ETF"),
-    # 主题
-    ("512980", "传媒ETF"),
-    ("512660", "军工ETF"),
-    ("159869", "游戏ETF"),
-    ("512580", "环保ETF"),
-    # 跨境/防守
-    ("513180", "恒生科技ETF"),
-    ("510880", "红利ETF"),
-    ("512890", "红利低波ETF"),
-    # 产业热点
-    ("562500", "机器人ETF"),
-]
+# ===== ETF 池分层 =====
+ETF_BUCKETS = {
+    # 日常主要盯盘和择时的核心交易池
+    "core": [
+        ("510300", "沪深300ETF"),
+        ("510500", "中证500ETF"),
+        ("588000", "科创50ETF"),
+        ("512480", "半导体ETF"),
+        ("515070", "人工智能ETF"),
+        ("512010", "医药ETF"),
+        ("512880", "证券ETF"),
+        ("512660", "军工ETF"),
+        ("513180", "恒生科技ETF"),
+        ("562500", "机器人ETF"),
+        ("159326", "电网设备ETF"),
+    ],
+    # 主题对、但优先级略低，适合观察轮动和升级
+    "watch": [
+        ("512100", "中证1000ETF"),
+        ("159915", "创业板ETF"),
+        ("515880", "通信ETF"),
+        ("562800", "稀有金属ETF"),
+        ("516110", "汽车ETF"),
+        ("512800", "银行ETF"),
+        ("512400", "有色金属ETF"),
+        ("517520", "黄金股ETF"),
+        ("516160", "新能源ETF"),
+        ("159611", "电力ETF"),
+        ("562550", "绿电ETF"),
+        ("159566", "储能电池ETF"),
+        ("512620", "农业ETF"),
+    ],
+    # 不按波段主逻辑处理，单列出来避免和交易池混用
+    "dca": [
+        ("512890", "红利低波ETF"),
+    ],
+}
+ETF_POOL = [item for bucket in ETF_BUCKETS.values() for item in bucket]
 ETF_NAME = {code: name for code, name in ETF_POOL}
+ETF_BUCKET_LABELS = {
+    "core": "核心交易池",
+    "watch": "主题观察池",
+    "dca": "定投池",
+}
+ETF_TO_BUCKET = {
+    code: bucket
+    for bucket, items in ETF_BUCKETS.items()
+    for code, _ in items
+}
 
 
 def get_cache_path(symbol: str) -> Path:
@@ -215,6 +231,69 @@ def _morning_elapsed_ratio() -> float:
     elif t <= 900:       # 13:00 - 15:00
         return (120 + t - 780) / 240
     return 1.0
+
+
+def _bucket_display_order(bucket: str) -> int:
+    return {"core": 0, "watch": 1, "dca": 2}.get(bucket, 9)
+
+
+def _print_bucket_overview(df: pd.DataFrame):
+    if "池子" not in df.columns:
+        return
+    print(f"\n{'='*60}")
+    print("  🎯 池子分层")
+    print(f"{'='*60}")
+    for bucket in ("core", "watch", "dca"):
+        group = df[df["池子key"] == bucket]
+        if group.empty:
+            continue
+        buy_n = int(group["状态"].isin(["★ 低位确认", "◆ 趋势跟随", "◇ 转强初期"]).sum())
+        strong_n = int(group["状态"].isin(["★ 低位确认", "◆ 趋势跟随", "◇ 转强初期", "□ 多头排列", "- 趋势完好"]).sum())
+        weak_n = int((group["状态"] == "✗ 趋势偏弱").sum())
+        print(f"  {ETF_BUCKET_LABELS.get(bucket, bucket)}: {len(group)}只  可参与{buy_n}  走强/完好{strong_n}  偏弱{weak_n}")
+    print()
+
+
+def _run_etf_agent_cli(symbols: list[str]) -> dict[str, dict]:
+    """调用 etf-agent 的正式 CLI 契约，只读取 JSON 结果。"""
+    if not symbols:
+        return {}
+    root = Path("/Users/bytedance/etf-agent")
+    start = root / "start.sh"
+    if not start.exists():
+        return {}
+    try:
+        proc = subprocess.run(
+            [str(start), "analyze", *symbols, "--json"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+    except Exception:
+        return {}
+
+    stdout = (proc.stdout or "").strip()
+    if not stdout:
+        return {}
+    try:
+        payload = json.loads(stdout)
+    except json.JSONDecodeError:
+        return {}
+
+    out = {}
+    for row in payload.get("results", []):
+        code = str(row.get("code", "")).strip()
+        if not code or row.get("error"):
+            continue
+        out[code] = {
+            "score": row.get("score", "?"),
+            "if_empty": row.get("if_empty", "?"),
+            "if_holding": row.get("if_holding", "?"),
+            "reason": row.get("reason", ""),
+            "breakdown": row.get("breakdown", ""),
+        }
+    return out
 
 
 def is_cache_fresh(symbol: str) -> bool:
@@ -389,7 +468,7 @@ def analyze(symbol: str, name: str, as_of_date: str = None,
         if as_of_date:
             df = df[df["date"].astype(str).str[:10] <= as_of_date]
         df = df.tail(250)
-        if len(df) < 200:
+        if len(df) < 140:
             return {"代码": symbol, "名称": name, "状态": "⚠ 数据不足"}
 
         close = df["close"].astype(float)
@@ -455,7 +534,7 @@ def analyze(symbol: str, name: str, as_of_date: str = None,
             if above_long and days_below >= 3:
                 breakout = f"⬆ 突破({days_below}/5日在MA50下)"
 
-        # ★ 保留低位主买点；◆ 则作为小仓可执行的趋势跟随信号。
+        # ★ 保留低位主买点；◆ 则作为可继续少量参与的趋势跟随信号。
         # 历史样本里拖后腿的◆，大多是 MA20 尚未稳稳站上 MA50，
         # 或 MA20 只是刚刚贴着 MA50，趋势结构还太脆。这里把◆收紧为：
         # 1) 中长期结构至少满足 MA20 > MA50 > MA100
@@ -521,18 +600,30 @@ def analyze(symbol: str, name: str, as_of_date: str = None,
             and dist_ma50_pct <= 5.0
             and -1.8 < ma50_slope <= 0
         )
+        learning_signal = (
+            not above_long
+            and c > m5 and c > m10 and c > m20
+            and m5 > m10 > m20
+            and ma5_up
+            and ma20_up
+            and 0.8 <= vol_ratio <= 1.8
+            and dist_ma50_pct <= 8.0
+            and c >= m50 * 0.94
+        )
         near_support = above_long and dist_ma50_pct <= 5.0 and c < m20
 
         if strict_buy:
             status = "★ 低位确认"
         elif trend_follow_ready or early_reversal_follow or early_bull_follow:
             status = "◆ 趋势跟随"
+        elif learning_signal:
+            status = "◇ 转强初期"
         elif early_reversal_watch:
             status = "- 趋势完好"
         elif near_support:
             status = "▲ 接近支撑"
         elif bull_align:
-            status = "◇ 多头排列"
+            status = "□ 多头排列"
         elif above_long:
             status = "- 趋势完好"
         else:
@@ -557,7 +648,7 @@ def analyze(symbol: str, name: str, as_of_date: str = None,
         # ========== 买入信号可信度评估 ==========
         assess = ""
         risk_tier = ""
-        if status in ("★ 低位确认", "◆ 趋势跟随"):
+        if status in ("★ 低位确认", "◆ 趋势跟随", "◇ 转强初期"):
             score = 0
             warns = []
 
@@ -664,8 +755,8 @@ def analyze(symbol: str, name: str, as_of_date: str = None,
 
 
 STATUS_ORDER = [
-    "★ 低位确认", "◆ 趋势跟随", "▲ 接近支撑",
-    "◇ 多头排列", "- 趋势完好", "✗ 趋势偏弱",
+    "★ 低位确认", "◆ 趋势跟随", "◇ 转强初期",
+    "▲ 接近支撑", "□ 多头排列", "- 趋势完好", "✗ 趋势偏弱",
 ]
 
 # 状态优先级（数字越小越好）
@@ -766,20 +857,20 @@ def check_holdings(df: pd.DataFrame) -> list:
         # 止盈 = 结构已转弱，需要兑现利润。
         take_profit_watch = (
             dist_val >= 8
-            and cur_status in ("◆ 趋势跟随", "◇ 多头排列", "- 趋势完好", "▲ 接近支撑")
+            and cur_status in ("◆ 趋势跟随", "□ 多头排列", "- 趋势完好", "▲ 接近支撑")
         )
         take_profit_soft = (
             dist_val >= 8
             and ma5 > 0
             and price < ma5
             and row.get("MA5拐头") == "↓"
-            and cur_status in ("◆ 趋势跟随", "◇ 多头排列", "- 趋势完好", "▲ 接近支撑")
+            and cur_status in ("◆ 趋势跟随", "□ 多头排列", "- 趋势完好", "▲ 接近支撑")
         )
         take_profit_hard = (
             dist_val >= 10
             and ma10 > 0
             and price < ma10
-            and cur_status in ("◇ 多头排列", "- 趋势完好", "▲ 接近支撑")
+            and cur_status in ("□ 多头排列", "- 趋势完好", "▲ 接近支撑")
         )
 
         # 买入信号→多头排列/趋势完好 是正常的信号兑现，不算降级
@@ -847,18 +938,25 @@ def check_holdings(df: pd.DataFrame) -> list:
                 "基金": fund, "ETF": name, "级别": "🟢 加仓",
                 "信号变化": f"{buy_status} → {cur_status}",
                 "距MA50": dist_str, "风险等级": tier,
-                "建议": f"低位确认，可加仓 [{tier}]",
+                "建议": f"低位确认，可以再买一点 [{tier}]",
             })
         elif cur_status == "◆ 趋势跟随":
-            # 技术面仍好但已脱离低位 → 持有兑现，不追高加仓
+            # 技术面仍好但已脱离低位 → 持有兑现，不追高追加太多
             tier = "追涨" if dist_val < 10 else "高位博弈"
             alerts.append({
                 "基金": fund, "ETF": name, "级别": "🔵 持有",
                 "信号变化": f"{buy_status} → {cur_status}",
                 "距MA50": dist_str, "风险等级": tier,
-                "建议": f"趋势跟随阶段，持有为主，已{tier}不建议追高加仓",
+                "建议": f"趋势跟随阶段，持有为主，已{tier}不建议再多买",
             })
-        elif cur_status == "◇ 多头排列":
+        elif cur_status == "◇ 转强初期":
+            alerts.append({
+                "基金": fund, "ETF": name, "级别": "🟡 观察",
+                "信号变化": f"{buy_status} → {cur_status}",
+                "距MA50": dist_str, "风险等级": "早期",
+                "建议": "短线转强但中期趋势未确认，如要参与只先买一点",
+            })
+        elif cur_status == "□ 多头排列":
             if dist_val < 5:
                 tier = "低位"
             elif dist_val < 10:
@@ -869,14 +967,14 @@ def check_holdings(df: pd.DataFrame) -> list:
                 "基金": fund, "ETF": name, "级别": "🟢 加仓",
                 "信号变化": f"{buy_status} → {cur_status}",
                 "距MA50": dist_str, "风险等级": tier,
-                "建议": f"多头排列，可加仓 [{tier}]",
+                "建议": f"多头排列，可以再买一点 [{tier}]",
             })
         elif cur_status == "▲ 接近支撑" and row.get("MA5拐头") == "↑":
             alerts.append({
                 "基金": fund, "ETF": name, "级别": "🟢 加仓",
                 "信号变化": f"{buy_status} → {cur_status}",
                 "距MA50": dist_str, "风险等级": "低位",
-                "建议": "支撑位企稳，MA5拐头，可加仓 [低位]",
+                "建议": "支撑位企稳，MA5拐头，可以再买一点 [低位]",
             })
         else:
             # ▲ 接近支撑(MA5↓) — 回调未企稳，持有观望
@@ -1083,6 +1181,7 @@ def main():
     parser.add_argument("--compare", action="store_true", help="与盘中快照对比(盘后模式)")
     parser.add_argument("--no-cache", action="store_true", help="不使用缓存，全部实时拉取")
     parser.add_argument("--morning", action="store_true", help="早盘分析(实时数据，不缓存)")
+    parser.add_argument("--llm", action="store_true", help="调用 etf-agent CLI 做二次判断（默认关闭）")
     parser.add_argument("--code", metavar="CODE", help="查询单只ETF的分析信息(股票代码)")
     args = parser.parse_args()
 
@@ -1100,6 +1199,13 @@ def main():
                 name = code
         skip = args.no_cache or args.morning
         result = analyze(code, name, skip_cache=skip, morning=args.morning)
+        if args.llm:
+            cli_rows = _run_etf_agent_cli([code])
+            lite = cli_rows.get(code)
+            if lite:
+                result["Agent空仓"] = lite["if_empty"]
+                result["Agent持有"] = lite["if_holding"]
+                result["Agent理由"] = lite["reason"]
         print(f"\n{'='*60}")
         print(f"  📋 {name}（{code}）分析详情")
         print(f"{'='*60}")
@@ -1150,20 +1256,37 @@ def main():
         print(f"  完成! (在线: {len(ETF_POOL)-cached_count}, 缓存: {cached_count})")
 
     df = pd.DataFrame(results)
+    df["池子key"] = df["代码"].map(ETF_TO_BUCKET).fillna("watch")
+    df["池子"] = df["池子key"].map(ETF_BUCKET_LABELS).fillna("主题观察池")
+    actionable_statuses = {"★ 低位确认", "◆ 趋势跟随", "◇ 转强初期"}
+    if args.llm:
+        actionable_codes = [str(code) for code in df[df["状态"].isin(actionable_statuses)]["代码"].tolist()]
+        cli_rows = _run_etf_agent_cli(actionable_codes)
+    else:
+        cli_rows = {}
+    df["Agent空仓"] = df["代码"].astype(str).map(lambda c: cli_rows.get(c, {}).get("if_empty", ""))
+    df["Agent持有"] = df["代码"].astype(str).map(lambda c: cli_rows.get(c, {}).get("if_holding", ""))
+    df["Agent理由"] = df["代码"].astype(str).map(lambda c: cli_rows.get(c, {}).get("reason", ""))
 
     df["_sort"] = df["状态"].map(_STATUS_RANK).fillna(99)
     df = df.sort_values("_sort")
 
+    agent_cols = ["Agent空仓", "Agent持有"] if args.llm else []
     if args.morning:
-        show_cols = ["代码", "名称", "现价", "昨收", "开盘涨跌", "早盘涨跌", "早盘量能",
-                     "距MA50", "量比", "MA5拐头", "状态", "突破", "试探", "信号评估", "场外基金"]
+        show_cols = ["池子", "代码", "名称", "现价", "昨收", "开盘涨跌", "早盘涨跌", "早盘量能",
+                     "距MA50", "量比", "MA5拐头", "状态", *agent_cols,
+                     "突破", "试探", "信号评估", "场外基金"]
     elif args.detail:
-        show_cols = ["代码", "名称", "现价", "MA5", "MA10", "MA20", "MA50", "MA100",
-                     "距MA50", "量比", "回踩MA50", "MA5拐头", "状态", "突破", "试探", "风险等级", "信号评估", "场外基金"]
+        show_cols = ["池子", "代码", "名称", "现价", "MA5", "MA10", "MA20", "MA50", "MA100",
+                     "距MA50", "量比", "回踩MA50", "MA5拐头", "状态", *agent_cols,
+                     "突破", "试探", "风险等级", "信号评估", "场外基金"]
     else:
-        show_cols = ["代码", "名称", "现价", "距MA50", "量比", "MA5拐头", "状态", "突破", "试探", "风险等级", "信号评估", "场外基金"]
+        show_cols = ["池子", "代码", "名称", "现价", "距MA50", "量比", "MA5拐头", "状态",
+                     *agent_cols, "突破", "试探", "风险等级", "信号评估", "场外基金"]
 
     valid_cols = [c for c in show_cols if c in df.columns]
+
+    _print_bucket_overview(df)
 
     # 分组输出
     displayed = set()
@@ -1175,8 +1298,10 @@ def main():
         print(f"\n{'='*60}")
         print(f"  {status_label}  ({len(group)}只)")
         print(f"{'='*60}")
-        cols = valid_cols if status_label in ("★ 低位确认", "◆ 趋势跟随") else [
+        cols = valid_cols if status_label in ("★ 低位确认", "◆ 趋势跟随", "◇ 转强初期") else [
             c for c in valid_cols if c not in ("信号评估", "场外基金")]
+        if status_label not in ("★ 低位确认", "◆ 趋势跟随", "◇ 转强初期"):
+            cols = [c for c in cols if c not in ("Agent空仓", "Agent持有")]
         # "试探"列只在"接近支撑"分组显示
         if status_label != "▲ 接近支撑":
             cols = [c for c in cols if c != "试探"]
@@ -1202,9 +1327,9 @@ def main():
     print(f"  扫描: {len(df)}  成功: {ok}  异常: {len(df)-ok}")
     probe_str = f"  ◆试探: {probe_count}" if probe_count > 0 else ""
     breakout_str = f"  ⬆突破: {breakout_count}" if breakout_count > 0 else ""
-    print(f"  ★低位: {counts['★ 低位确认']}  ◆跟随: {counts['◆ 趋势跟随']}  "
+    print(f"  ★低位: {counts['★ 低位确认']}  ◆跟随: {counts['◆ 趋势跟随']}  ◇转强: {counts['◇ 转强初期']}  "
           f"▲支撑: {counts['▲ 接近支撑']}  "
-          f"◇多头: {counts['◇ 多头排列']}{probe_str}{breakout_str}")
+          f"□多头: {counts['□ 多头排列']}{probe_str}{breakout_str}")
     print()
 
     # ===== 早盘概览 =====
@@ -1383,12 +1508,24 @@ def save_xhs_log(df: pd.DataFrame, counts: dict, holding_alerts: list = None, co
     lines.append("📋 信号分布：")
     lines.append(f"★ 低位确认：{counts['★ 低位确认']} 只")
     lines.append(f"◆ 趋势跟随：{counts['◆ 趋势跟随']} 只")
+    lines.append(f"◇ 转强初期：{counts['◇ 转强初期']} 只")
     lines.append(f"▲ 接近支撑：{counts['▲ 接近支撑']} 只")
 
-    lines.append(f"◇ 多头排列：{counts['◇ 多头排列']} 只")
+    lines.append(f"□ 多头排列：{counts['□ 多头排列']} 只")
     lines.append(f"- 趋势完好：{counts['- 趋势完好']} 只")
     lines.append(f"✗ 趋势偏弱：{counts['✗ 趋势偏弱']} 只")
     lines.append("")
+    if "池子key" in df.columns:
+        lines.append("🎯 池子分层：")
+        for bucket in ("core", "watch", "dca"):
+            group = df[df["池子key"] == bucket]
+            if group.empty:
+                continue
+            buy_n = int(group["状态"].isin(["★ 低位确认", "◆ 趋势跟随", "◇ 转强初期"]).sum())
+            strong_n = int(group["状态"].isin(["★ 低位确认", "◆ 趋势跟随", "◇ 转强初期", "□ 多头排列", "- 趋势完好"]).sum())
+            weak_n = int((group["状态"] == "✗ 趋势偏弱").sum())
+            lines.append(f"{ETF_BUCKET_LABELS.get(bucket, bucket)}：{len(group)}只｜可参与{buy_n}｜走强/完好{strong_n}｜偏弱{weak_n}")
+        lines.append("")
 
     # 买入信号详情
     buy = df[df["状态"] == "★ 低位确认"]
@@ -1407,19 +1544,39 @@ def save_xhs_log(df: pd.DataFrame, counts: dict, holding_alerts: list = None, co
             lines.append(f"   现价 {row.get('现价','')} ｜距MA50 {row.get('距MA50','')} ｜量比 {row.get('量比','')}")
             lines.append(f"   MA5拐头{row.get('MA5拐头','')} ｜回踩MA50: {row.get('回踩MA50','')}")
             lines.append(f"   信号评估: {level}（{reason}）")
+            if row.get("Agent空仓") or row.get("Agent持有"):
+                lines.append(f"   🤖 Agent: 空仓{row.get('Agent空仓','?')} ｜ 持有{row.get('Agent持有','?')}")
+                if row.get("Agent理由"):
+                    lines.append(f"   综合理由: {row.get('Agent理由','')}")
             if otc:
                 lines.append(f"   👉 场外基金: {otc}")
             lines.append("")
 
-    # 趋势跟随（非最佳低位，但技术面已可轻仓参与）
+    # 趋势跟随（非最佳低位，但技术面已可继续少量参与）
     hold = df[df["状态"] == "◆ 趋势跟随"]
     if not hold.empty:
         lines.append("—" * 20)
-        lines.append("◆ 趋势跟随（趋势延续型买点，空仓可轻仓试建，持仓继续拿）：")
+        lines.append("◆ 趋势跟随（趋势延续型买点，可继续少量参与，已有持仓继续拿）：")
         for _, row in hold.iterrows():
             tier = row.get("风险等级", "")
             tier_tag = f" [{tier}]" if tier else ""
-            lines.append(f"   ◆ {row['名称']} {row.get('现价','')} ｜距MA50 {row.get('距MA50','')}{tier_tag}")
+            agent_tag = ""
+            if row.get("Agent空仓") or row.get("Agent持有"):
+                agent_tag = f" ｜Agent 空仓{row.get('Agent空仓','?')}/持有{row.get('Agent持有','?')}"
+            lines.append(f"   ◆ {row['名称']} {row.get('现价','')} ｜距MA50 {row.get('距MA50','')}{tier_tag}{agent_tag}")
+        lines.append("")
+
+    learn = df[df["状态"] == "◇ 转强初期"]
+    if not learn.empty:
+        lines.append("—" * 20)
+        lines.append("◇ 转强初期（短线转强，但中期趋势还没确认，可先买一点看看）：")
+        for _, row in learn.iterrows():
+            tier = row.get("风险等级", "")
+            tier_tag = f" [{tier}]" if tier else ""
+            agent_tag = ""
+            if row.get("Agent空仓") or row.get("Agent持有"):
+                agent_tag = f" ｜Agent 空仓{row.get('Agent空仓','?')}/持有{row.get('Agent持有','?')}"
+            lines.append(f"   ◇ {row['名称']} {row.get('现价','')} ｜距MA50 {row.get('距MA50','')}{tier_tag}{agent_tag}")
         lines.append("")
 
     # 接近支撑
@@ -1442,12 +1599,12 @@ def save_xhs_log(df: pd.DataFrame, counts: dict, holding_alerts: list = None, co
             lines.append("")
 
     # 多头排列
-    bull = df[df["状态"] == "◇ 多头排列"]
+    bull = df[df["状态"] == "□ 多头排列"]
     if not bull.empty:
         lines.append("—" * 20)
         lines.append("💪 多头排列（趋势健康，持有为主）：")
         for _, row in bull.iterrows():
-            lines.append(f"   ◇ {row['名称']} {row.get('现价','')} ｜距MA50 {row.get('距MA50','')}")
+            lines.append(f"   □ {row['名称']} {row.get('现价','')} ｜距MA50 {row.get('距MA50','')}")
         lines.append("")
 
     # 趋势完好
@@ -1519,8 +1676,9 @@ def save_xhs_log(df: pd.DataFrame, counts: dict, holding_alerts: list = None, co
     lines.append("—" * 20)
     lines.append("📌 信号说明：")
     lines.append("★ 低位确认：回踩MA50确认+放量站回短期均线+MA5拐头")
-    lines.append("◆ 趋势跟随：右侧跟随或强势反转早期，可轻仓参与")
-    lines.append("◇ 价格在所有均线之上，趋势健康")
+    lines.append("◇ 转强初期：短线转强但仍在MA50/MA100下方，可先买一点看看")
+    lines.append("◆ 趋势跟随：右侧跟随或强势反转早期，可继续少量参与")
+    lines.append("□ 价格在所有均线之上，趋势健康")
     lines.append("⚠️ 仅供参考，不构成投资建议")
     lines.append("")
     lines.append(f"#ETF #基金定投 #A股 #技术分析 #{today_full}")
@@ -1576,14 +1734,31 @@ def notify_feishu(df: pd.DataFrame, counts: dict, compare_report: bool = False,
                 "content": (
                     f"**★ 低位 {counts['★ 低位确认']}**  |  "
                     f"◆ 跟随 {counts['◆ 趋势跟随']}  |  "
+                    f"◇ 转强 {counts['◇ 转强初期']}  |  "
                     f"▲ 支撑 {counts['▲ 接近支撑']}  |  "
-                    f"◇ 多头 {counts['◇ 多头排列']}  |  "
+                    f"□ 多头 {counts['□ 多头排列']}  |  "
                     f"- 完好 {counts['- 趋势完好']}  |  "
                     f"✗ 偏弱 {counts['✗ 趋势偏弱']}\n"
                     f"扫描 {total} 只，成功 {ok}，异常 {total - ok}"
                 ),
             },
         })
+        if "池子key" in df.columns:
+            bucket_lines = ["**🎯 池子分层**"]
+            for bucket in ("core", "watch", "dca"):
+                group = df[df["池子key"] == bucket]
+                if group.empty:
+                    continue
+                buy_n = int(group["状态"].isin(["★ 低位确认", "◆ 趋势跟随", "◇ 转强初期"]).sum())
+                strong_n = int(group["状态"].isin(["★ 低位确认", "◆ 趋势跟随", "◇ 转强初期", "□ 多头排列", "- 趋势完好"]).sum())
+                weak_n = int((group["状态"] == "✗ 趋势偏弱").sum())
+                bucket_lines.append(
+                    f"{ETF_BUCKET_LABELS.get(bucket, bucket)}：{len(group)}只  可参与{buy_n}  走强/完好{strong_n}  偏弱{weak_n}"
+                )
+            elements.append({
+                "tag": "div",
+                "text": {"tag": "lark_md", "content": "\n".join(bucket_lines)},
+            })
 
         # 买入信号详情
         buy = df[df["状态"] == "★ 低位确认"]
@@ -1596,9 +1771,14 @@ def notify_feishu(df: pd.DataFrame, counts: dict, compare_report: bool = False,
                 reason = assess.split("|")[1] if "|" in assess else ""
                 tier = row.get("风险等级", "")
                 tier_tag = f"  **[{tier}]**" if tier else ""
-                md = (f"**{row['名称']}**  {row.get('现价','')}{tier_tag}\n"
+                bucket_tag = f"[{row.get('池子', '')}] "
+                md = (f"{bucket_tag}**{row['名称']}**  {row.get('现价','')}{tier_tag}\n"
                       f"距MA50 {row.get('距MA50','')}  量比 {row.get('量比','')}\n"
                       f"评估: {level}·{reason}")
+                if row.get("Agent空仓") or row.get("Agent持有"):
+                    md += f"\n🤖 Agent: 空仓{row.get('Agent空仓','?')} / 持有{row.get('Agent持有','?')}"
+                    if row.get("Agent理由"):
+                        md += f"\n综合理由: {row.get('Agent理由','')}"
                 if otc:
                     md += f"  →  {otc}"
                 elements.append({
@@ -1606,21 +1786,49 @@ def notify_feishu(df: pd.DataFrame, counts: dict, compare_report: bool = False,
                     "text": {"tag": "lark_md", "content": md},
                 })
 
-        # 趋势跟随（非最佳低位，但技术面已可轻仓参与）
+        # 趋势跟随（非最佳低位，但技术面已可继续少量参与）
         hold = df[df["状态"] == "◆ 趋势跟随"]
         if not hold.empty:
             elements.append({"tag": "hr"})
-            hlines = ["**◆ 趋势跟随**（趋势延续型买点，空仓可轻仓试建）"]
+            hlines = ["**◆ 趋势跟随**（趋势延续型买点，可继续少量参与）"]
             for _, row in hold.iterrows():
                 tier = row.get("风险等级", "")
                 tier_tag = f"  [{tier}]" if tier else ""
+                otc = OTC_FUND.get(row["代码"])
+                fund_str = f"  →  {otc[0]} {otc[1]}" if otc else ""
+                bucket_tag = f"[{row.get('池子', '')}] "
+                extra = ""
+                if row.get("Agent空仓") or row.get("Agent持有"):
+                    extra = f"  ｜Agent 空仓{row.get('Agent空仓','?')}/持有{row.get('Agent持有','?')}"
                 hlines.append(
-                    f"◆ {row['名称']}  {row.get('现价','')}  "
-                    f"距MA50 {row.get('距MA50','')}{tier_tag}"
+                    f"◆ {bucket_tag}{row['名称']}  {row.get('现价','')}  "
+                    f"距MA50 {row.get('距MA50','')}{tier_tag}{extra}{fund_str}"
                 )
             elements.append({
                 "tag": "div",
                 "text": {"tag": "lark_md", "content": "\n".join(hlines)},
+            })
+
+        learn = df[df["状态"] == "◇ 转强初期"]
+        if not learn.empty:
+            elements.append({"tag": "hr"})
+            llines = ["**◇ 转强初期**（短线转强，但中期趋势未确认，可先买一点看看）"]
+            for _, row in learn.iterrows():
+                tier = row.get("风险等级", "")
+                tier_tag = f"  [{tier}]" if tier else ""
+                otc = OTC_FUND.get(row["代码"])
+                fund_str = f"  →  {otc[0]} {otc[1]}" if otc else ""
+                bucket_tag = f"[{row.get('池子', '')}] "
+                extra = ""
+                if row.get("Agent空仓") or row.get("Agent持有"):
+                    extra = f"  ｜Agent 空仓{row.get('Agent空仓','?')}/持有{row.get('Agent持有','?')}"
+                llines.append(
+                    f"◇ {bucket_tag}{row['名称']}  {row.get('现价','')}  "
+                    f"距MA50 {row.get('距MA50','')}{tier_tag}{extra}{fund_str}"
+                )
+            elements.append({
+                "tag": "div",
+                "text": {"tag": "lark_md", "content": "\n".join(llines)},
             })
 
         # 接近支撑摘要 + 试探建仓建议
@@ -1632,61 +1840,77 @@ def notify_feishu(df: pd.DataFrame, counts: dict, compare_report: bool = False,
                 probe_val = str(row.get("试探", ""))
                 otc = OTC_FUND.get(row["代码"])
                 fund_str = f"  →  {otc[0]} {otc[1]}" if otc else ""
+                bucket_tag = f"[{row.get('池子', '')}] "
                 if probe_val.startswith("◆"):
                     lines.append(
-                        f"◆ **{row['名称']}**  距MA50 {row.get('距MA50','')}  "
+                        f"◆ {bucket_tag}**{row['名称']}**  距MA50 {row.get('距MA50','')}  "
                         f"量比 {row.get('量比','')}\n"
                         f"已回踩验证  {probe_val.replace('◆ ', '')}"
-                        f"  可小仓试探{fund_str}"
+                        f"  可以先买一点{fund_str}"
                     )
                 elif probe_val.startswith("◇"):
                     lines.append(
-                        f"◇ **{row['名称']}**  距MA50 {row.get('距MA50','')}  "
+                        f"◇ {bucket_tag}**{row['名称']}**  距MA50 {row.get('距MA50','')}  "
                         f"量比 {row.get('量比','')}\n"
                         f"支撑待验证  {probe_val.replace('◇ ', '')}"
                         f"  观望为主{fund_str}"
                     )
                 else:
-                    lines.append(f"  {row['名称']}  距MA50 {row.get('距MA50','')}")
+                    lines.append(f"  {bucket_tag}{row['名称']}  距MA50 {row.get('距MA50','')}")
             elements.append({
                 "tag": "div",
                 "text": {"tag": "lark_md", "content": "\n".join(lines)},
             })
 
         # 多头排列摘要
-        bull = df[df["状态"] == "◇ 多头排列"]
+        bull = df[df["状态"] == "□ 多头排列"]
         if not bull.empty:
             elements.append({"tag": "hr"})
-            names = "、".join(bull["名称"].tolist())
+            lines = ["**□ 多头排列**"]
+            for _, row in bull.iterrows():
+                otc = OTC_FUND.get(row["代码"])
+                fund_str = f"  →  {otc[0]} {otc[1]}" if otc else ""
+                bucket_tag = f"[{row.get('池子', '')}] "
+                lines.append(f"□ {bucket_tag}{row['名称']}{fund_str}")
             elements.append({
                 "tag": "div",
                 "text": {
                     "tag": "lark_md",
-                    "content": f"**◇ 多头排列**\n{names}",
+                    "content": "\n".join(lines),
                 },
             })
 
         # 趋势完好摘要
         good = df[df["状态"] == "- 趋势完好"]
         if not good.empty:
-            names = "、".join(good["名称"].tolist())
+            lines = ["**- 趋势完好**"]
+            for _, row in good.iterrows():
+                otc = OTC_FUND.get(row["代码"])
+                fund_str = f"  →  {otc[0]} {otc[1]}" if otc else ""
+                bucket_tag = f"[{row.get('池子', '')}] "
+                lines.append(f"- {bucket_tag}{row['名称']}{fund_str}")
             elements.append({
                 "tag": "div",
                 "text": {
                     "tag": "lark_md",
-                    "content": f"**- 趋势完好**\n{names}",
+                    "content": "\n".join(lines),
                 },
             })
 
         # 趋势偏弱摘要
         weak = df[df["状态"] == "✗ 趋势偏弱"]
         if not weak.empty:
-            names = "、".join(weak["名称"].tolist())
+            lines = ["**✗ 趋势偏弱**"]
+            for _, row in weak.iterrows():
+                otc = OTC_FUND.get(row["代码"])
+                fund_str = f"  →  {otc[0]} {otc[1]}" if otc else ""
+                bucket_tag = f"[{row.get('池子', '')}] "
+                lines.append(f"✗ {bucket_tag}{row['名称']}{fund_str}")
             elements.append({
                 "tag": "div",
                 "text": {
                     "tag": "lark_md",
-                    "content": f"**✗ 趋势偏弱**\n{names}",
+                    "content": "\n".join(lines),
                 },
             })
 

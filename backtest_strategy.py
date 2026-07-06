@@ -13,9 +13,12 @@ OUT_DIR = LOG_DIR / "strategy_backtest"
 
 BUY_STATUS = "★ 低位确认"
 FOLLOW_STATUS = "◆ 趋势跟随"
+LEARN_STATUS = "◇ 转强初期"
 WEAK_STATUS = "✗ 趋势偏弱"
-TP_STATUSES = {"◆ 趋势跟随", "◇ 多头排列", "- 趋势完好", "▲ 接近支撑"}
-BUY_WEIGHTS = {BUY_STATUS: 1.0, FOLLOW_STATUS: 0.5}
+TP_STATUSES = {"◆ 趋势跟随", "□ 多头排列", "- 趋势完好", "▲ 接近支撑"}
+# 当前 scan.py 新增了“转强初期”，但它不是确认型买点。
+# 回测里给它更小的权重，只用于估算“先买一点看看”的收益弹性。
+BUY_WEIGHTS = {BUY_STATUS: 1.0, FOLLOW_STATUS: 0.5, LEARN_STATUS: 0.25}
 
 
 def load_scan_dates() -> list[str]:
@@ -72,7 +75,7 @@ def take_profit_reason(row: dict) -> str | None:
         dist_val >= 10
         and ma10 > 0
         and price < ma10
-        and status in {"◇ 多头排列", "- 趋势完好", "▲ 接近支撑"}
+        and status in {"□ 多头排列", "- 趋势完好", "▲ 接近支撑"}
     )
     if hard:
         return "take_profit_hard"
@@ -99,7 +102,7 @@ def load_hist(symbol: str) -> pd.DataFrame:
 def analyze_hist(symbol: str, name: str, as_of_date: str) -> dict:
     df = load_hist(symbol)
     df = df[df["date"].astype(str).str[:10] <= as_of_date].tail(250).copy()
-    if len(df) < 200:
+    if len(df) < 140:
         return {"代码": symbol, "名称": name, "状态": "⚠ 数据不足"}
 
     close = df["close"].astype(float)
@@ -210,18 +213,30 @@ def analyze_hist(symbol: str, name: str, as_of_date: str) -> dict:
         and dist_ma50_pct <= 5.0
         and -1.8 < ma50_slope <= 0
     )
+    learning_signal = (
+        not above_long
+        and c > m5 and c > m10 and c > m20
+        and m5 > m10 > m20
+        and ma5_up
+        and ma20_up
+        and 0.8 <= vol_ratio <= 1.8
+        and dist_ma50_pct <= 8.0
+        and c >= m50 * 0.94
+    )
     near_support = above_long and dist_ma50_pct <= 5.0 and c < m20
 
     if strict_buy:
         status = "★ 低位确认"
     elif trend_follow_ready or early_reversal_follow or early_bull_follow:
         status = "◆ 趋势跟随"
+    elif learning_signal:
+        status = "◇ 转强初期"
     elif early_reversal_watch:
         status = "- 趋势完好"
     elif near_support:
         status = "▲ 接近支撑"
     elif bull_align:
-        status = "◇ 多头排列"
+        status = "□ 多头排列"
     elif above_long:
         status = "- 趋势完好"
     else:
@@ -403,7 +418,7 @@ def write_report(history: pd.DataFrame, trades: pd.DataFrame) -> Path:
     lines = [
         "# Strategy Backtest",
         "",
-        "- Buy rule: current `scan.py` opens on `★ 低位确认` (1.0x) and `◆ 趋势跟随` (0.5x)",
+        "- Buy rule: current `scan.py` opens on `★ 低位确认` (1.0x), `◆ 趋势跟随` (0.5x), and `◇ 转强初期` (0.25x estimate)",
         "- Exit rule: first `✗ 趋势偏弱` or first structural `take_profit` trigger",
         "- Open trades are marked to market with the latest available scan date",
         "",

@@ -1258,7 +1258,7 @@ def main():
     df = pd.DataFrame(results)
     df["池子key"] = df["代码"].map(ETF_TO_BUCKET).fillna("watch")
     df["池子"] = df["池子key"].map(ETF_BUCKET_LABELS).fillna("主题观察池")
-    actionable_statuses = {"★ 低位确认", "◆ 趋势跟随", "◇ 转强初期"}
+    actionable_statuses = {"★ 低位确认", "◆ 趋势跟随", "◇ 转强初期", "▲ 接近支撑"}
     if args.llm:
         actionable_codes = [str(code) for code in df[df["状态"].isin(actionable_statuses)]["代码"].tolist()]
         cli_rows = _run_etf_agent_cli(actionable_codes)
@@ -1290,6 +1290,8 @@ def main():
 
     # 分组输出
     displayed = set()
+    detail_statuses = ("★ 低位确认", "◆ 趋势跟随", "◇ 转强初期")
+    llm_statuses = (*detail_statuses, "▲ 接近支撑")
     for status_label in STATUS_ORDER:
         group = df[df["状态"] == status_label]
         if group.empty:
@@ -1298,9 +1300,9 @@ def main():
         print(f"\n{'='*60}")
         print(f"  {status_label}  ({len(group)}只)")
         print(f"{'='*60}")
-        cols = valid_cols if status_label in ("★ 低位确认", "◆ 趋势跟随", "◇ 转强初期") else [
+        cols = valid_cols if status_label in detail_statuses else [
             c for c in valid_cols if c not in ("信号评估", "场外基金")]
-        if status_label not in ("★ 低位确认", "◆ 趋势跟随", "◇ 转强初期"):
+        if status_label not in llm_statuses:
             cols = [c for c in cols if c not in ("Agent空仓", "Agent持有")]
         # "试探"列只在"接近支撑"分组显示
         if status_label != "▲ 接近支撑":
@@ -1585,7 +1587,10 @@ def save_xhs_log(df: pd.DataFrame, counts: dict, holding_alerts: list = None, co
         lines.append("—" * 20)
         lines.append("⚡ 接近支撑（关注反弹机会）：")
         for _, row in support.iterrows():
-            lines.append(f"   ▲ {row['名称']} {row.get('现价','')} ｜距MA50 {row.get('距MA50','')}")
+            agent_tag = ""
+            if row.get("Agent空仓") or row.get("Agent持有"):
+                agent_tag = f" ｜Agent 空仓{row.get('Agent空仓','?')}/持有{row.get('Agent持有','?')}"
+            lines.append(f"   ▲ {row['名称']} {row.get('现价','')} ｜距MA50 {row.get('距MA50','')}{agent_tag}")
         lines.append("")
 
     # 突破提醒
@@ -1841,22 +1846,25 @@ def notify_feishu(df: pd.DataFrame, counts: dict, compare_report: bool = False,
                 otc = OTC_FUND.get(row["代码"])
                 fund_str = f"  →  {otc[0]} {otc[1]}" if otc else ""
                 bucket_tag = f"[{row.get('池子', '')}] "
+                agent_tag = ""
+                if row.get("Agent空仓") or row.get("Agent持有"):
+                    agent_tag = f"  ｜Agent 空仓{row.get('Agent空仓','?')}/持有{row.get('Agent持有','?')}"
                 if probe_val.startswith("◆"):
                     lines.append(
                         f"◆ {bucket_tag}**{row['名称']}**  距MA50 {row.get('距MA50','')}  "
-                        f"量比 {row.get('量比','')}\n"
+                        f"量比 {row.get('量比','')}{agent_tag}\n"
                         f"已回踩验证  {probe_val.replace('◆ ', '')}"
                         f"  可以先买一点{fund_str}"
                     )
                 elif probe_val.startswith("◇"):
                     lines.append(
                         f"◇ {bucket_tag}**{row['名称']}**  距MA50 {row.get('距MA50','')}  "
-                        f"量比 {row.get('量比','')}\n"
+                        f"量比 {row.get('量比','')}{agent_tag}\n"
                         f"支撑待验证  {probe_val.replace('◇ ', '')}"
                         f"  观望为主{fund_str}"
                     )
                 else:
-                    lines.append(f"  {bucket_tag}{row['名称']}  距MA50 {row.get('距MA50','')}")
+                    lines.append(f"  {bucket_tag}{row['名称']}  距MA50 {row.get('距MA50','')}{agent_tag}")
             elements.append({
                 "tag": "div",
                 "text": {"tag": "lark_md", "content": "\n".join(lines)},

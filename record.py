@@ -116,15 +116,23 @@ def _save_records(records: list, path: Path = RECORDS_PATH):
 
 def _lookup_from_log(etf_code: str, date: str) -> dict | None:
     """从扫描日志中提取某只ETF当天的信号（比收盘数据回算更准确）"""
+    yyyymmdd = date.replace("-", "")
     mmdd = date[5:].replace("-", "")
-    # 优先盘中日志，再看盘后日志
-    for suffix in ["_intraday", ""]:
-        path = LOG_DIR / f"scan_{mmdd}{suffix}.log"
+    candidates = []
+    # 优先当前仓库实际使用的 YYYYMMDD 命名，兼容旧的 MMDD 命名
+    for prefix in (yyyymmdd, mmdd):
+        for suffix in ("_intraday", ""):
+            path = LOG_DIR / f"scan_{prefix}{suffix}.log"
+            if path not in candidates:
+                candidates.append(path)
+
+    for path in candidates:
         if not path.exists():
             continue
         text = path.read_text(encoding="utf-8")
         for line in text.splitlines():
-            if not line.strip().startswith(etf_code):
+            parts = line.split()
+            if etf_code not in parts:
                 continue
             # 提取状态
             status = None
@@ -135,7 +143,6 @@ def _lookup_from_log(etf_code: str, date: str) -> dict | None:
             if not status:
                 continue
             # 提取关键指标
-            parts = line.split()
             result = {"状态": status, "来源": f"日志({path.name})"}
             # 现价是第3个字段(代码、名称之后)
             for p in parts:

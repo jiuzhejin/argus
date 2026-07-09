@@ -261,7 +261,11 @@ def _run_etf_agent_cli(symbols: list[str]) -> dict[str, dict]:
     root = Path("/Users/bytedance/etf-agent")
     start = root / "start.sh"
     if not start.exists():
+        print(f"  🤖 etf-agent: 未找到 start.sh({start})，跳过 LLM 复核")
         return {}
+
+    print(f"  🤖 etf-agent: 请求 {len(symbols)} 只 -> {', '.join(symbols)}")
+    t0 = time.time()
     try:
         proc = subprocess.run(
             [str(start), "analyze", *symbols, "--json"],
@@ -270,21 +274,38 @@ def _run_etf_agent_cli(symbols: list[str]) -> dict[str, dict]:
             text=True,
             timeout=300,
         )
-    except Exception:
+    except subprocess.TimeoutExpired:
+        print(f"  🤖 etf-agent: ⚠ 子进程超时(>300s)，本次无 LLM 结果")
         return {}
+    except Exception as e:
+        print(f"  🤖 etf-agent: ⚠ 子进程启动失败: {e}")
+        return {}
+
+    elapsed = time.time() - t0
+    stderr = (proc.stderr or "").strip()
+    if proc.returncode != 0:
+        print(f"  🤖 etf-agent: ⚠ 退出码 {proc.returncode}（耗时 {elapsed:.1f}s）"
+              f"{('  stderr: ' + stderr[-300:]) if stderr else ''}")
 
     stdout = (proc.stdout or "").strip()
     if not stdout:
+        print(f"  🤖 etf-agent: ⚠ stdout 为空（耗时 {elapsed:.1f}s）"
+              f"{('  stderr: ' + stderr[-300:]) if stderr else ''}")
         return {}
     try:
         payload = json.loads(stdout)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as e:
+        print(f"  🤖 etf-agent: ⚠ JSON 解析失败: {e}  stdout 前 300 字: {stdout[:300]}")
         return {}
 
     out = {}
+    failed = []
     for row in payload.get("results", []):
         code = str(row.get("code", "")).strip()
-        if not code or row.get("error"):
+        if not code:
+            continue
+        if row.get("error"):
+            failed.append(f"{code}({row.get('error')})")
             continue
         out[code] = {
             "score": row.get("score", "?"),
@@ -293,6 +314,13 @@ def _run_etf_agent_cli(symbols: list[str]) -> dict[str, dict]:
             "reason": row.get("reason", ""),
             "breakdown": row.get("breakdown", ""),
         }
+
+    stats = payload.get("stats", {}) or {}
+    print(f"  🤖 etf-agent: 成功 {len(out)} 只  失败 {len(failed)} 只  "
+          f"llm_calls={stats.get('llm_calls', '?')}  cache_hits={stats.get('cache_hits', '?')}  "
+          f"耗时 {elapsed:.1f}s")
+    if failed:
+        print(f"  🤖 etf-agent: ⚠ 无结果明细: {'; '.join(failed)}")
     return out
 
 
@@ -834,8 +862,6 @@ def check_holdings(df: pd.DataFrame) -> list:
         row = row.iloc[0]
         cur_status = row.get("状态", "")
         buy_status = rec.get("当时信号", "")
-        cur_rank = _STATUS_RANK.get(cur_status, 99)
-        buy_rank = _STATUS_RANK.get(buy_status, 99)
 
         name = rec["ETF名称"]
         fund = rec["联接基金"]
@@ -896,12 +922,14 @@ def check_holdings(df: pd.DataFrame) -> list:
                 "距MA50": dist_str,
                 "建议": "已进入利润保护区，开始盯MA5/MA10是否转弱",
             })
-        elif cur_status == "✗ 趋势偏弱" or cur_rank >= 5:
+        elif cur_status == "✗ 趋势偏弱" or cur_status not in _STATUS_RANK:
             # 状态转弱不等于要立刻割：区分"真破位"和"浅回踩/缩量假摔"。
             # 真止损需要确认——明显跌破MA50，或放量跌破；否则只是刚破线，先观察。
+            # 注意：这里用"状态是否已知"判断异常，不用 rank 阈值——
+            #       STATUS_ORDER 增删枚举会改变各状态的 rank，硬编码数字会误伤。
             vol_ratio = float(row.get("量比", 0) or 0)
             confirmed_breakdown = (
-                cur_rank > 5                                # 状态异常/未知，保守止损
+                cur_status not in _STATUS_RANK              # 状态异常/未知，保守止损
                 or dist_val <= -3                           # 已明显跌破MA50(超3%)
                 or (dist_val < 0 and vol_ratio >= 1.5)      # 放量跌破MA50
             )

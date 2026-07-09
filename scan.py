@@ -371,15 +371,24 @@ def load_snapshot(tag: str) -> list | None:
         return None
 
 
+def _market_prefix(symbol: str) -> str:
+    """判断沪深市场前缀。
+    深市 ETF/基金：15x / 16x 开头 → sz
+    沪市 ETF/基金：5x（含 51x/56x/58x）开头 → sh
+    注意：56/58 开头是沪市(上交所)，不是深市——早期误判为 sz 会导致
+          新浪实时返回空、腾讯日K缺当日，进而用昨收当现价。
+    """
+    return "sz" if symbol.startswith(("15", "16")) else "sh"
+
+
 def sina_symbol(symbol: str) -> str:
     """转换为新浪格式：沪市加sh，深市加sz"""
-    return f"sz{symbol}" if symbol.startswith(("15", "56")) else f"sh{symbol}"
+    return f"{_market_prefix(symbol)}{symbol}"
 
 
 def fetch_hist_tx(symbol: str) -> pd.DataFrame:
     """腾讯日K线原始接口"""
-    prefix = "sz" if symbol.startswith(("15", "56")) else "sh"
-    code = f"{prefix}{symbol}"
+    code = f"{_market_prefix(symbol)}{symbol}"
     url = f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={code},day,,,250,qfq"
     r = _requests.get(url, timeout=10)
     r.raise_for_status()

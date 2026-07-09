@@ -811,10 +811,13 @@ DCA_CONFIG = [
 ]
 
 
-def check_holdings(df: pd.DataFrame) -> list:
-    """检查持仓信号变化，返回预警列表"""
+def _load_holdings() -> dict:
+    """读取交易记录并按ETF汇总净份额，返回 {code: 最近一笔买入记录}(仍有持仓的)。
+
+    单一事实来源：持仓监控(check_holdings)与买入建议的持仓感知都复用它。
+    """
     if not RECORDS_PATH.exists():
-        return []
+        return {}
     try:
         from record import _load_records
         records = _load_records()
@@ -823,9 +826,9 @@ def check_holdings(df: pd.DataFrame) -> list:
             records = json.loads(RECORDS_PATH.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             print(f"  ⚠ 交易记录文件损坏，跳过持仓监控")
-            return []
+            return {}
     if not records:
-        return []
+        return {}
 
     # 按ETF汇总净份额，排除已清仓
     from collections import defaultdict
@@ -862,6 +865,41 @@ def check_holdings(df: pd.DataFrame) -> list:
     for code, rec in _last_buy.items():
         if _shares.get(code, 0) > 1:  # 还有持仓(忽略<1份的舍入误差)
             holdings[code] = rec
+    return holdings
+
+
+def _held_codes() -> set:
+    """当前仍有持仓的ETF代码集合(字符串)。"""
+    return {str(code) for code in _load_holdings().keys()}
+
+
+def _add_advice(dist_val: float, held: bool) -> str:
+    """已持仓时的加仓判据(以距MA50位置为主，5%/10% 分档)。
+
+    未持仓返回空串(走各分组原有建仓文案)；阈值与 check_holdings 的 tier 一致。
+    """
+    if not held:
+        return ""
+    if dist_val < 5:
+        return "已持有·回踩低位可再补一点 [低位]"
+    if dist_val < 10:
+        return "已持有·位置偏高，追涨慎加，持有为主 [追涨]"
+    return "已持有·高位不建议再加，持有为主 [高位博弈]"
+
+
+def _parse_dist(dist_str) -> float:
+    """解析距MA50字符串(如 '+0.4%')为浮点数，失败返回0。"""
+    try:
+        return float(str(dist_str).replace("%", "").replace("+", ""))
+    except (ValueError, AttributeError):
+        return 0.0
+
+
+def check_holdings(df: pd.DataFrame) -> list:
+    """检查持仓信号变化，返回预警列表"""
+    holdings = _load_holdings()
+    if not holdings:
+        return []
 
     alerts = []
     for code, rec in holdings.items():
@@ -877,10 +915,7 @@ def check_holdings(df: pd.DataFrame) -> list:
 
         # 跌破MA50 → 止损警告
         dist_str = row.get("距MA50", "+0%")
-        try:
-            dist_val = float(dist_str.replace("%", "").replace("+", ""))
-        except (ValueError, AttributeError):
-            dist_val = 0
+        dist_val = _parse_dist(dist_str)
 
         price = float(row.get("现价", 0) or 0)
         ma5 = float(row.get("MA5", 0) or 0)
@@ -1305,6 +1340,10 @@ def main():
     df["Agent持有"] = df["代码"].astype(str).map(lambda c: cli_rows.get(c, {}).get("if_holding", ""))
     df["Agent理由"] = df["代码"].astype(str).map(lambda c: cli_rows.get(c, {}).get("reason", ""))
 
+    # 持仓感知：标记当前仍有持仓的票，供终端与飞书买入建议统一口径
+    _held = _held_codes()
+    df["已持仓"] = df["代码"].astype(str).isin(_held)
+
     df["_sort"] = df["状态"].map(_STATUS_RANK).fillna(99)
     df = df.sort_values("_sort")
 
@@ -1347,7 +1386,12 @@ def main():
         # "突破"列只在有突破标记的分组显示
         if "突破" in group.columns and group["突破"].astype(str).str.len().max() == 0:
             cols = [c for c in cols if c != "突破"]
-        print(group[cols].to_string(index=False))
+        # 已持仓的票在名称后加 [持] 后缀，与飞书买入建议口径一致
+        disp = group.copy()
+        if "已持仓" in disp.columns and "名称" in disp.columns:
+            disp["名称"] = disp.apply(
+                lambda r: f"{r['名称']}[持]" if r.get("已持仓") else r["名称"], axis=1)
+        print(disp[cols].to_string(index=False))
 
     # 异常
     errors = df[~df.index.isin(displayed)]
@@ -1842,9 +1886,13 @@ def notify_feishu(df: pd.DataFrame, counts: dict, compare_report: bool = False,
                 extra = ""
                 if row.get("Agent空仓") or row.get("Agent持有"):
                     extra = f"  ｜Agent 空仓{row.get('Agent空仓','?')}/持有{row.get('Agent持有','?')}"
+                held_tag = ""
+                if row.get("已持仓"):
+                    adv = _add_advice(_parse_dist(row.get("距MA50", "")), True)
+                    held_tag = f"  ｜{adv}"
                 hlines.append(
                     f"◆ {bucket_tag}{row['名称']}  {row.get('现价','')}  "
-                    f"距MA50 {row.get('距MA50','')}{tier_tag}{extra}{fund_str}"
+                    f"距MA50 {row.get('距MA50','')}{tier_tag}{extra}{held_tag}{fund_str}"
                 )
             elements.append({
                 "tag": "div",
@@ -1864,9 +1912,13 @@ def notify_feishu(df: pd.DataFrame, counts: dict, compare_report: bool = False,
                 extra = ""
                 if row.get("Agent空仓") or row.get("Agent持有"):
                     extra = f"  ｜Agent 空仓{row.get('Agent空仓','?')}/持有{row.get('Agent持有','?')}"
+                held_tag = ""
+                if row.get("已持仓"):
+                    adv = _add_advice(_parse_dist(row.get("距MA50", "")), True)
+                    held_tag = f"  ｜{adv}"
                 llines.append(
                     f"◇ {bucket_tag}{row['名称']}  {row.get('现价','')}  "
-                    f"距MA50 {row.get('距MA50','')}{tier_tag}{extra}{fund_str}"
+                    f"距MA50 {row.get('距MA50','')}{tier_tag}{extra}{held_tag}{fund_str}"
                 )
             elements.append({
                 "tag": "div",
@@ -1887,11 +1939,14 @@ def notify_feishu(df: pd.DataFrame, counts: dict, compare_report: bool = False,
                 if row.get("Agent空仓") or row.get("Agent持有"):
                     agent_tag = f"  ｜Agent 空仓{row.get('Agent空仓','?')}/持有{row.get('Agent持有','?')}"
                 if probe_val.startswith("◆"):
+                    held = bool(row.get("已持仓"))
+                    adv = _add_advice(_parse_dist(row.get("距MA50", "")), held)
+                    buy_txt = adv if adv else "可以先买一点"
                     lines.append(
                         f"◆ {bucket_tag}**{row['名称']}**  距MA50 {row.get('距MA50','')}  "
                         f"量比 {row.get('量比','')}{agent_tag}\n"
                         f"已回踩验证  {probe_val.replace('◆ ', '')}"
-                        f"  可以先买一点{fund_str}"
+                        f"  {buy_txt}{fund_str}"
                     )
                 elif probe_val.startswith("◇"):
                     lines.append(

@@ -8,8 +8,13 @@
     _parse_dist   距MA50 字符串解析与异常回退
     _load_holdings / _held_codes  净份额聚合、清仓排除、份额回退
     check_holdings  关键分支(接近支撑加仓 / 趋势偏弱止损分档)
+    save_cache / is_cache_fresh  缓存只存历史K(剔除当日行)、按日期判新鲜
 """
+import os
+import tempfile
 import unittest
+from datetime import datetime, timedelta
+from pathlib import Path
 from unittest import mock
 
 import pandas as pd
@@ -273,6 +278,53 @@ class TestCheckHoldings(unittest.TestCase):
             [_df_row("510300", "▲ 接近支撑", "+0.4%")],
         )
         self.assertEqual(alerts, [])
+
+
+class TestCache(unittest.TestCase):
+    """save_cache 只存历史K(剔除当日行); is_cache_fresh 按日期(mtime)判新鲜。
+
+    历史K收盘后不再变，当日价永远走实时源现抓，因此当天拉过一次即可全天复用，
+    跨到新交易日才重拉。用临时目录替换 CACHE_DIR，避免污染真实缓存。
+    """
+
+    def setUp(self):
+        self._orig_dir = scan.CACHE_DIR
+        self.tmp = Path(tempfile.mkdtemp())
+        scan.CACHE_DIR = self.tmp
+        self.today = datetime.now().strftime("%Y-%m-%d")
+        self.yst = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    def tearDown(self):
+        scan.CACHE_DIR = self._orig_dir
+
+    def test_save_cache_strips_today(self):
+        # 含当日行的 df，写入后当日行被剔除，历史行保留
+        df = pd.DataFrame({"date": [self.yst, self.today], "close": [1.0, 2.0]})
+        scan.save_cache("TEST", df)
+        saved = pd.read_csv(self.tmp / "TEST.csv")
+        dates = list(saved["date"].astype(str))
+        self.assertNotIn(self.today, dates)
+        self.assertIn(self.yst, dates)
+
+    def test_save_cache_keeps_all_history(self):
+        # 全是历史行时不误删
+        df = pd.DataFrame({"date": [self.yst], "close": [1.0]})
+        scan.save_cache("TEST", df)
+        saved = pd.read_csv(self.tmp / "TEST.csv")
+        self.assertEqual(list(saved["date"].astype(str)), [self.yst])
+
+    def test_fresh_when_written_today(self):
+        scan.save_cache("TEST", pd.DataFrame({"date": [self.yst], "close": [1.0]}))
+        self.assertTrue(scan.is_cache_fresh("TEST"))
+
+    def test_stale_when_written_yesterday(self):
+        scan.save_cache("TEST", pd.DataFrame({"date": [self.yst], "close": [1.0]}))
+        old = (datetime.now() - timedelta(days=1)).timestamp()
+        os.utime(self.tmp / "TEST.csv", (old, old))
+        self.assertFalse(scan.is_cache_fresh("TEST"))
+
+    def test_stale_when_missing(self):
+        self.assertFalse(scan.is_cache_fresh("NOPE"))
 
 
 if __name__ == "__main__":

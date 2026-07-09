@@ -30,7 +30,7 @@ import os
 import subprocess
 import sys
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 import json
@@ -65,8 +65,6 @@ class TeeStream:
 
     def isatty(self):
         return self.terminal.isatty()
-CACHE_MAX_AGE_HOURS = 4  # 盘后缓存有效期
-CACHE_INTRADAY_MINUTES = 15  # 盘中缓存有效期(分钟)
 
 # ===== 场外联接基金(C类，短期持有费率更低) =====
 OTC_FUND = {
@@ -331,14 +329,18 @@ def _run_etf_agent_cli(symbols: list[str]) -> dict[str, dict]:
 
 
 def is_cache_fresh(symbol: str) -> bool:
+    """历史K缓存是否新鲜。
+
+    缓存里只存"截止昨天"的历史日K(不含当日价，当日价永远走实时源现抓)。
+    历史K一旦收盘就不再变，因此"当天拉过一次"即可全天复用——用缓存文件
+    mtime 是否为今天判定。跨到新交易日时 mtime 落在昨天 → 判过期 → 重拉一次，
+    补进最近一个已收盘交易日的K。
+    """
     path = get_cache_path(symbol)
     if not path.exists():
         return False
     mtime = datetime.fromtimestamp(path.stat().st_mtime)
-    age = datetime.now() - mtime
-    if _is_trading_hours():
-        return age < timedelta(minutes=CACHE_INTRADAY_MINUTES)
-    return age < timedelta(hours=CACHE_MAX_AGE_HOURS)
+    return mtime.date() == datetime.now().date()
 
 
 def load_cached(symbol: str) -> pd.DataFrame | None:
@@ -349,7 +351,16 @@ def load_cached(symbol: str) -> pd.DataFrame | None:
 
 
 def save_cache(symbol: str, df: pd.DataFrame):
+    """写入历史K缓存。
+
+    写前剔除"当日行"：部分数据源(如东财)盘中/收盘后会返回一个当日行，
+    其价格可能是盘中中间态。缓存只保留确定的历史K，当日价一律由实时源
+    每次现抓追加(见 fetch_hist)，从根上杜绝脏当日价被持久化。
+    """
     CACHE_DIR.mkdir(exist_ok=True)
+    if "date" in df.columns and not df.empty:
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        df = df[df["date"].astype(str).str[:10] < today_str]
     df.to_csv(get_cache_path(symbol), index=False)
 
 

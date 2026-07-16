@@ -186,6 +186,7 @@ ETF_BUCKETS = {
         ("562550", "绿电ETF"),
         ("159566", "储能电池ETF"),
         ("512620", "农业ETF"),
+        ("159869", "动漫游戏ETF"),
     ],
     # 不按波段主逻辑处理，单列出来避免和交易池混用
     "dca": [
@@ -536,7 +537,7 @@ def analyze(symbol: str, name: str, as_of_date: str = None,
         ma100 = close.rolling(100).mean()
 
         # 成交量均线
-        vol_avg20 = volume.rolling(20).mean()
+        vol_avg20 = volume.shift(1).rolling(20).mean()
 
         # 最新值
         c = close.iloc[-1]
@@ -555,6 +556,36 @@ def analyze(symbol: str, name: str, as_of_date: str = None,
         ma5_up = ma5.iloc[-1] > ma5.iloc[-2] and ma5.iloc[-2] > ma5.iloc[-3]
         ma20_up = ma20.iloc[-1] > ma20.iloc[-2] and ma20.iloc[-2] > ma20.iloc[-3]
         vol_ratio = round(vol / va20, 2) if pd.notna(va20) and va20 > 0 else 0
+        partial_day = morning or _is_trading_hours()
+        event_end = len(volume) - 1 if partial_day else len(volume)
+        event_start = max(0, event_end - 5)
+        event_ratios = (volume.iloc[event_start:event_end] /
+                        vol_avg20.iloc[event_start:event_end])
+        recent_volume_event = bool((event_ratios >= 1.5).fillna(False).any())
+        event_feedback_ok = False
+        if recent_volume_event:
+            event_offset = int(event_ratios.fillna(0).argmax())
+            event_index = event_start + event_offset
+            event_close = close.iloc[event_index]
+            post_event = close.iloc[event_index + 1:event_end + 1]
+            event_feedback_ok = bool(
+                c >= event_close * 0.98
+                and (post_event.empty or post_event.min() >= event_close * 0.98)
+            )
+        recent_volume_ratio = round(
+            (volume.iloc[max(0, event_end - 3):event_end].mean() / va20)
+            if pd.notna(va20) and va20 > 0 and event_end > 0 else 0,
+            2,
+        )
+        reversal_volume_ok = (
+            0.8 <= vol_ratio <= 1.8
+            or (
+                recent_volume_event
+                and event_feedback_ok
+                and 0.5 <= vol_ratio <= 1.8
+                and recent_volume_ratio <= 2.5
+            )
+        )
         dist_ma50_pct = round((c - m50) / m50 * 100, 2)
 
         # ========== 数据校验 ==========
@@ -650,7 +681,7 @@ def analyze(symbol: str, name: str, as_of_date: str = None,
             and ma20_up
             and c > m5 and c > m10
             and m5 > m10 > m20
-            and 0.8 <= vol_ratio <= 1.8
+            and reversal_volume_ok
             and dist_ma50_pct <= 5.0
             and -1.8 < ma50_slope <= 0
         )
@@ -660,7 +691,7 @@ def analyze(symbol: str, name: str, as_of_date: str = None,
             and m5 > m10 > m20
             and ma5_up
             and ma20_up
-            and 0.8 <= vol_ratio <= 1.8
+            and reversal_volume_ok
             and dist_ma50_pct <= 8.0
             and c >= m50 * 0.94
         )
@@ -776,6 +807,9 @@ def analyze(symbol: str, name: str, as_of_date: str = None,
             "MA50": round(m50, 3), "MA100": round(m100, 3),
             "距MA50": f"{dist_ma50_pct:+.1f}%",
             "量比": vol_ratio,
+            "近3日量比": recent_volume_ratio,
+            "近5日放量": "是" if recent_volume_event else "否",
+            "放量后守住": "是" if event_feedback_ok else "否",
             "回踩MA50": "是" if support_tested else "否",
             "MA5拐头": "↑" if ma5_up else "↓",
             "状态": status,

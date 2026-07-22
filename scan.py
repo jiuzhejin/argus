@@ -254,8 +254,10 @@ def _print_bucket_overview(df: pd.DataFrame):
             continue
         buy_n = int(group["状态"].isin(["★ 低位确认", "◆ 趋势跟随", "◇ 转强初期"]).sum())
         strong_n = int(group["状态"].isin(["★ 低位确认", "◆ 趋势跟随", "◇ 转强初期", "□ 多头排列", "- 趋势完好"]).sum())
+        crit_n = int((group["状态"] == "◈ 临界观察").sum())
         weak_n = int((group["状态"] == "✗ 趋势偏弱").sum())
-        print(f"  {ETF_BUCKET_LABELS.get(bucket, bucket)}: {len(group)}只  可参与{buy_n}  走强/完好{strong_n}  偏弱{weak_n}")
+        crit_str = f"  临界{crit_n}" if crit_n else ""
+        print(f"  {ETF_BUCKET_LABELS.get(bucket, bucket)}: {len(group)}只  可参与{buy_n}  走强/完好{strong_n}{crit_str}  偏弱{weak_n}")
     print()
 
 
@@ -514,6 +516,26 @@ def fetch_hist(symbol: str, max_retries: int = 3, skip_cache: bool = False) -> p
     return df
 
 
+# ◈ 临界观察确认项标签(顺序即展示优先级)
+CRIT_CONFIRM_LABELS = ("均线未理顺(MA5>10>20)", "MA5未拐头↑", "MA20未拐头↑", "量能未确认")
+
+
+def critical_watch_eval(gate_ok: bool, ma_aligned: bool, ma5_up: bool,
+                        ma20_up: bool, volume_ok: bool) -> tuple[bool, str]:
+    """◈ 临界观察判定(纯函数，便于单测)。
+
+    门槛项(gate_ok，须由调用方全过)：仍在长期均线下方、不太深、价站上短均线。
+    确认项共 4 项：均线理顺 / MA5拐头 / MA20拐头 / 放量确认。
+    规则：门槛全过 且 4 项确认"恰好差 1 项" → 临界观察；
+          差 0 项即 ◇ 转强初期，差 ≥2 项仍 ✗ 偏弱。
+    返回 (是否临界, 缺项文案)；非临界时文案为空串。
+    """
+    confirms = (ma_aligned, ma5_up, ma20_up, volume_ok)
+    miss = [label for label, ok in zip(CRIT_CONFIRM_LABELS, confirms) if not ok]
+    is_crit = gate_ok and len(miss) == 1
+    return is_crit, (miss[0] if is_crit else "")
+
+
 def analyze(symbol: str, name: str, as_of_date: str = None,
             skip_cache: bool = False, morning: bool = False) -> dict:
     """计算均线信号。as_of_date='2026-05-14' 时只用该日及之前的数据。"""
@@ -697,6 +719,20 @@ def analyze(symbol: str, name: str, as_of_date: str = None,
         )
         near_support = above_long and dist_ma50_pct <= 5.0 and c < m20
 
+        # ◈ 临界观察：只读的可见性标注，不是买点。
+        # 把"结构已开始转强、只差最后一道确认"的票从偏弱里挑出来提示。
+        # 门槛项(必须全过)：仍在长期均线下方、不能跌太深、价已站上自己的短均线；
+        # 确认项(共4项)：均线理顺 / MA5拐头 / MA20拐头 / 放量确认。
+        # 判定：门槛全过 且 4项确认"恰好差1项"→ ◈；差0项即 ◇ 转强初期，差≥2项仍 ✗ 偏弱。
+        crit_gate = (
+            not above_long
+            and dist_ma50_pct <= 8.0
+            and c >= m50 * 0.94
+            and c > m5 and c > m10 and c > m20
+        )
+        critical_watch, crit_miss = critical_watch_eval(
+            crit_gate, m5 > m10 > m20, ma5_up, ma20_up, reversal_volume_ok)
+
         # □ 多头排列的入场条件：结构低位 + 温和放量 + 拐头向上 + 近期贴过MA50
         # 用来把"从下往上翻越型多头"和"高位脉冲加速型多头"分开，前者可先买一点
         # dist ≤ 3% 是回放得出的准确率与期望值均改善的分割线，>3% 命中率骤降
@@ -722,6 +758,8 @@ def analyze(symbol: str, name: str, as_of_date: str = None,
             status = "□ 多头排列"
         elif above_long:
             status = "- 趋势完好"
+        elif critical_watch:
+            status = "◈ 临界观察"
         else:
             status = "✗ 趋势偏弱"
 
@@ -827,6 +865,7 @@ def analyze(symbol: str, name: str, as_of_date: str = None,
             "试探": probe,
             "突破": breakout,
             "多头入场": "是" if bull_entry_ok else "",
+            "临界原因": crit_miss if status == "◈ 临界观察" else "",
         }
         # 今日涨跌幅(现价 vs 昨收)——任何模式都产出，供持仓判断区分放量上涨/下跌
         if len(close) >= 2:
@@ -861,7 +900,7 @@ def analyze(symbol: str, name: str, as_of_date: str = None,
 
 STATUS_ORDER = [
     "★ 低位确认", "◆ 趋势跟随", "◇ 转强初期",
-    "▲ 接近支撑", "□ 多头排列", "- 趋势完好", "✗ 趋势偏弱",
+    "▲ 接近支撑", "□ 多头排列", "- 趋势完好", "◈ 临界观察", "✗ 趋势偏弱",
 ]
 
 # 状态优先级（数字越小越好）
@@ -1454,14 +1493,14 @@ def main():
     if args.morning:
         show_cols = ["池子", "代码", "名称", "现价", "昨收", "开盘涨跌", "早盘涨跌", "早盘量能",
                      "距MA50", "量比", "MA5拐头", "状态", *agent_cols,
-                     "多头入场", "突破", "试探", "信号评估", "场外基金"]
+                     "多头入场", "突破", "试探", "临界原因", "信号评估", "场外基金"]
     elif args.detail:
         show_cols = ["池子", "代码", "名称", "现价", "MA5", "MA10", "MA20", "MA50", "MA100",
                      "距MA50", "量比", "回踩MA50", "MA5拐头", "状态", *agent_cols,
-                     "多头入场", "突破", "试探", "风险等级", "信号评估", "场外基金"]
+                     "多头入场", "突破", "试探", "临界原因", "风险等级", "信号评估", "场外基金"]
     else:
         show_cols = ["池子", "代码", "名称", "现价", "距MA50", "量比", "MA5拐头", "状态",
-                     *agent_cols, "多头入场", "突破", "试探", "风险等级", "信号评估", "场外基金"]
+                     *agent_cols, "多头入场", "突破", "试探", "临界原因", "风险等级", "信号评估", "场外基金"]
 
     valid_cols = [c for c in show_cols if c in df.columns]
 
@@ -1489,6 +1528,9 @@ def main():
         # "多头入场"列只在"多头排列"分组显示
         if status_label != "□ 多头排列":
             cols = [c for c in cols if c != "多头入场"]
+        # "临界原因"列只在"临界观察"分组显示
+        if status_label != "◈ 临界观察":
+            cols = [c for c in cols if c != "临界原因"]
         # "突破"列只在有突破标记的分组显示
         if "突破" in group.columns and group["突破"].astype(str).str.len().max() == 0:
             cols = [c for c in cols if c != "突破"]
@@ -1516,9 +1558,10 @@ def main():
     print(f"  扫描: {len(df)}  成功: {ok}  异常: {len(df)-ok}")
     probe_str = f"  ◆试探: {probe_count}" if probe_count > 0 else ""
     breakout_str = f"  ⬆突破: {breakout_count}" if breakout_count > 0 else ""
+    crit_str = f"  ◈临界: {counts['◈ 临界观察']}" if counts['◈ 临界观察'] > 0 else ""
     print(f"  ★低位: {counts['★ 低位确认']}  ◆跟随: {counts['◆ 趋势跟随']}  ◇转强: {counts['◇ 转强初期']}  "
           f"▲支撑: {counts['▲ 接近支撑']}  "
-          f"□多头: {counts['□ 多头排列']}{probe_str}{breakout_str}")
+          f"□多头: {counts['□ 多头排列']}{crit_str}{probe_str}{breakout_str}")
     print()
 
     # ===== 早盘概览 =====
@@ -1705,6 +1748,7 @@ def save_xhs_log(df: pd.DataFrame, counts: dict, holding_alerts: list = None, co
 
     lines.append(f"□ 多头排列：{counts['□ 多头排列']} 只")
     lines.append(f"- 趋势完好：{counts['- 趋势完好']} 只")
+    lines.append(f"◈ 临界观察：{counts['◈ 临界观察']} 只")
     lines.append(f"✗ 趋势偏弱：{counts['✗ 趋势偏弱']} 只")
     lines.append("")
     if "池子key" in df.columns:
@@ -1715,8 +1759,10 @@ def save_xhs_log(df: pd.DataFrame, counts: dict, holding_alerts: list = None, co
                 continue
             buy_n = int(group["状态"].isin(["★ 低位确认", "◆ 趋势跟随", "◇ 转强初期"]).sum())
             strong_n = int(group["状态"].isin(["★ 低位确认", "◆ 趋势跟随", "◇ 转强初期", "□ 多头排列", "- 趋势完好"]).sum())
+            crit_n = int((group["状态"] == "◈ 临界观察").sum())
             weak_n = int((group["状态"] == "✗ 趋势偏弱").sum())
-            lines.append(f"{ETF_BUCKET_LABELS.get(bucket, bucket)}：{len(group)}只｜可参与{buy_n}｜走强/完好{strong_n}｜偏弱{weak_n}")
+            crit_str = f"｜临界{crit_n}" if crit_n else ""
+            lines.append(f"{ETF_BUCKET_LABELS.get(bucket, bucket)}：{len(group)}只｜可参与{buy_n}｜走强/完好{strong_n}{crit_str}｜偏弱{weak_n}")
         lines.append("")
 
     # 买入信号详情
@@ -1812,6 +1858,17 @@ def save_xhs_log(df: pd.DataFrame, counts: dict, holding_alerts: list = None, co
             lines.append(f"   - {row['名称']} {row.get('现价','')} ｜距MA50 {row.get('距MA50','')}")
         lines.append("")
 
+    # 临界观察
+    crit = df[df["状态"] == "◈ 临界观察"]
+    if not crit.empty:
+        lines.append("—" * 20)
+        lines.append("◈ 临界观察（结构接近转强，只差一步确认，未确认别追）：")
+        for _, row in crit.iterrows():
+            reason = row.get("临界原因", "")
+            reason_tag = f" ｜{reason}" if reason else ""
+            lines.append(f"   ◈ {row['名称']} {row.get('现价','')} ｜距MA50 {row.get('距MA50','')}{reason_tag}")
+        lines.append("")
+
     # 趋势偏弱
     weak = df[df["状态"] == "✗ 趋势偏弱"]
     if not weak.empty:
@@ -1878,6 +1935,7 @@ def save_xhs_log(df: pd.DataFrame, counts: dict, holding_alerts: list = None, co
     lines.append("★ 低位确认：回踩MA50确认+放量站回短期均线+MA5拐头")
     lines.append("◇ 转强初期：短线转强但仍在MA50/MA100下方，可先买一点看看")
     lines.append("◆ 趋势跟随：右侧跟随或强势反转早期，可继续少量参与")
+    lines.append("◈ 临界观察：结构接近转强但差一步确认，只盯不追")
     lines.append("□ 价格在所有均线之上，趋势健康")
     lines.append("⚠️ 仅供参考，不构成投资建议")
     lines.append("")
@@ -1938,6 +1996,7 @@ def notify_feishu(df: pd.DataFrame, counts: dict, compare_report: bool = False,
                     f"▲ 支撑 {counts['▲ 接近支撑']}  |  "
                     f"□ 多头 {counts['□ 多头排列']}  |  "
                     f"- 完好 {counts['- 趋势完好']}  |  "
+                    f"◈ 临界 {counts['◈ 临界观察']}  |  "
                     f"✗ 偏弱 {counts['✗ 趋势偏弱']}\n"
                     f"扫描 {total} 只，成功 {ok}，异常 {total - ok}"
                 ),
@@ -1951,9 +2010,11 @@ def notify_feishu(df: pd.DataFrame, counts: dict, compare_report: bool = False,
                     continue
                 buy_n = int(group["状态"].isin(["★ 低位确认", "◆ 趋势跟随", "◇ 转强初期"]).sum())
                 strong_n = int(group["状态"].isin(["★ 低位确认", "◆ 趋势跟随", "◇ 转强初期", "□ 多头排列", "- 趋势完好"]).sum())
+                crit_n = int((group["状态"] == "◈ 临界观察").sum())
                 weak_n = int((group["状态"] == "✗ 趋势偏弱").sum())
+                crit_str = f"  临界{crit_n}" if crit_n else ""
                 bucket_lines.append(
-                    f"{ETF_BUCKET_LABELS.get(bucket, bucket)}：{len(group)}只  可参与{buy_n}  走强/完好{strong_n}  偏弱{weak_n}"
+                    f"{ETF_BUCKET_LABELS.get(bucket, bucket)}：{len(group)}只  可参与{buy_n}  走强/完好{strong_n}{crit_str}  偏弱{weak_n}"
                 )
             elements.append({
                 "tag": "div",
@@ -2113,6 +2174,25 @@ def notify_feishu(df: pd.DataFrame, counts: dict, compare_report: bool = False,
                 fund_str = f"  →  {otc[0]} {otc[1]}" if otc else ""
                 bucket_tag = f"[{row.get('池子', '')}] "
                 lines.append(f"- {bucket_tag}{row['名称']}{fund_str}")
+            elements.append({
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": "\n".join(lines),
+                },
+            })
+
+        # 临界观察摘要
+        crit = df[df["状态"] == "◈ 临界观察"]
+        if not crit.empty:
+            lines = ["**◈ 临界观察**（结构接近转强，差一步确认，只盯不追）"]
+            for _, row in crit.iterrows():
+                otc = OTC_FUND.get(row["代码"])
+                fund_str = f"  →  {otc[0]} {otc[1]}" if otc else ""
+                bucket_tag = f"[{row.get('池子', '')}] "
+                reason = row.get("临界原因", "")
+                reason_tag = f"  {reason}" if reason else ""
+                lines.append(f"◈ {bucket_tag}{row['名称']} {row.get('距MA50','')}{reason_tag}{fund_str}")
             elements.append({
                 "tag": "div",
                 "text": {

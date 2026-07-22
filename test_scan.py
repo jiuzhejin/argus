@@ -290,6 +290,90 @@ class TestCheckHoldings(unittest.TestCase):
         self.assertEqual(alerts, [])
 
 
+class TestCriticalWatchEval(unittest.TestCase):
+    """critical_watch_eval: 门槛全过 且 4项确认恰好差1项 → ◈ 临界观察。
+
+    门槛项由调用方(analyze)判定后以 gate_ok 传入；这里只验判定与缺项文案。
+    确认项顺序: 均线理顺 / MA5拐头 / MA20拐头 / 放量确认。
+    """
+
+    def test_miss_volume_is_critical(self):
+        # 结构全齐、只差放量确认(农业场景) → 临界，缺项=量能
+        is_crit, miss = scan.critical_watch_eval(
+            True, ma_aligned=True, ma5_up=True, ma20_up=True, volume_ok=False)
+        self.assertTrue(is_crit)
+        self.assertEqual(miss, "量能未确认")
+
+    def test_miss_ma20_turn_is_critical(self):
+        # 只差 MA20 拐头(电力/绿电场景) → 临界，缺项=MA20
+        is_crit, miss = scan.critical_watch_eval(
+            True, ma_aligned=True, ma5_up=True, ma20_up=False, volume_ok=True)
+        self.assertTrue(is_crit)
+        self.assertEqual(miss, "MA20未拐头↑")
+
+    def test_all_confirms_is_not_critical(self):
+        # 4项确认全满足 → 不是临界(交由 analyze 判为 ◇ 转强初期)
+        is_crit, miss = scan.critical_watch_eval(
+            True, ma_aligned=True, ma5_up=True, ma20_up=True, volume_ok=True)
+        self.assertFalse(is_crit)
+        self.assertEqual(miss, "")
+
+    def test_miss_two_confirms_is_not_critical(self):
+        # 差 2 项确认 → 仍偏弱，不进临界
+        is_crit, miss = scan.critical_watch_eval(
+            True, ma_aligned=True, ma5_up=False, ma20_up=False, volume_ok=True)
+        self.assertFalse(is_crit)
+        self.assertEqual(miss, "")
+
+    def test_gate_fail_is_never_critical(self):
+        # 门槛不过(如跌太深) → 无论确认多好都不是临界
+        is_crit, miss = scan.critical_watch_eval(
+            False, ma_aligned=True, ma5_up=True, ma20_up=True, volume_ok=False)
+        self.assertFalse(is_crit)
+        self.assertEqual(miss, "")
+
+    def test_confirm_labels_length(self):
+        # 缺项标签数须与确认项数一致(增删确认项时防止错位)
+        self.assertEqual(len(scan.CRIT_CONFIRM_LABELS), 4)
+
+
+class TestCriticalWatchInStatusOrder(unittest.TestCase):
+    """◈ 临界观察须已登记进状态枚举，且排在完好与偏弱之间。"""
+
+    def test_in_status_order(self):
+        self.assertIn("◈ 临界观察", scan.STATUS_ORDER)
+
+    def test_between_good_and_weak(self):
+        order = scan.STATUS_ORDER
+        self.assertLess(order.index("- 趋势完好"), order.index("◈ 临界观察"))
+        self.assertLess(order.index("◈ 临界观察"), order.index("✗ 趋势偏弱"))
+
+    def test_in_status_rank(self):
+        # 进入 rank 表后，持仓票转临界观察不会被 check_holdings 当异常保守止损
+        self.assertIn("◈ 临界观察", scan._STATUS_RANK)
+
+
+class TestCriticalWatchHoldingNotStopLoss(unittest.TestCase):
+    """持仓票转 ◈ 临界观察时，不应触发止损(它比偏弱强，是在恢复)。"""
+
+    def _run(self, records, rows):
+        df = pd.DataFrame(rows)
+        fake_path = mock.Mock()
+        fake_path.exists.return_value = True
+        with mock.patch.object(scan, "RECORDS_PATH", fake_path), \
+             mock.patch("record._load_records", return_value=records):
+            return scan.check_holdings(df)
+
+    def test_critical_watch_not_stoploss(self):
+        # 距MA50 浅负、缩量，状态=临界观察 → 不喊 🔴 止损
+        alerts = self._run(
+            [_rec("159611", shares=1000)],
+            [_df_row("159611", "◈ 临界观察", "-3.0%", vol=1.0, ma5turn="↑")],
+        )
+        levels = [a["级别"] for a in alerts]
+        self.assertNotIn("🔴 止损", levels)
+
+
 class TestCache(unittest.TestCase):
     """save_cache 只存历史K(剔除当日行); is_cache_fresh 按日期(mtime)判新鲜。
 

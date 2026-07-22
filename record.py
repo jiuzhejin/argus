@@ -353,7 +353,18 @@ def show_records(dca: bool = False):
         holdings[fc]["records"].append(r)
         typ = r.get("类型", "买入")
         if typ == "清仓":
-            # 清仓：全部归零，后续买入从零开始统计
+            # 清仓：全部卖出剩余份额。若记录含净值/金额则计入已实现盈亏
+            amt_c, _ = _get_amt_nav(r)
+            b_amt = holdings[fc]["buy_amount"]
+            b_sh = holdings[fc]["buy_shares"]
+            s_amt = holdings[fc]["sell_amount"]
+            if amt_c and amt_c > 0 and b_sh > 0:
+                # 全部清出的已实现 = (历史卖出 + 本次清仓回收) - 累计买入成本
+                realized_c = (s_amt + amt_c) - b_amt
+                holdings[fc]["realized_clear"] = holdings[fc].get("realized_clear", 0) + realized_c
+                holdings[fc]["clear_cost"] = holdings[fc].get("clear_cost", 0) + b_amt
+                holdings[fc]["clear_proceeds"] = holdings[fc].get("clear_proceeds", 0) + s_amt + amt_c
+            # 归零，后续买入从零开始统计
             holdings[fc]["buy_amount"] = 0
             holdings[fc]["buy_shares"] = 0
             holdings[fc]["sell_amount"] = 0
@@ -408,6 +419,7 @@ def show_records(dca: bool = False):
         if buy_amt > 0 and buy_shares > 0:
             # 已实现盈亏: 卖出收回金额 - 卖出份额 * 加权成本
             realized = sell_amt - sell_shares * avg_cost if sell_shares > 0 else 0
+            realized += h.get("realized_clear", 0)  # 叠加历史清仓已实现
             grand_realized += realized
 
             net_cost = net_shares * avg_cost  # 剩余持仓成本
@@ -438,8 +450,19 @@ def show_records(dca: bool = False):
             elif sell_shares > 0:
                 print(f"    ✅ 已清仓")
         else:
-            n = len(h["records"])
-            print(f"    共 {n} 笔 (无金额记录，无法计算)")
+            # 已全部清仓：若有补齐的清仓盈亏则展示，否则无法计算
+            rc = h.get("realized_clear")
+            if rc is not None:
+                grand_realized += rc
+                r_sign = "+" if rc >= 0 else ""
+                cost_c = h.get("clear_cost", 0)
+                proc_c = h.get("clear_proceeds", 0)
+                pct_c = rc / cost_c * 100 if cost_c > 0 else 0
+                print(f"    ✅ 已清仓  投入{cost_c:.0f}元 → 回收{proc_c:.0f}元")
+                print(f"    已实现盈亏: {r_sign}{rc:.0f}元 ({pct_c:+.2f}%)")
+            else:
+                n = len(h["records"])
+                print(f"    共 {n} 笔 (无金额记录，无法计算)")
             if cur:
                 print(f"    最新净值: {cur['净值']}({cur['日期']})")
 

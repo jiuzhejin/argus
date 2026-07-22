@@ -697,6 +697,17 @@ def analyze(symbol: str, name: str, as_of_date: str = None,
         )
         near_support = above_long and dist_ma50_pct <= 5.0 and c < m20
 
+        # □ 多头排列的入场条件：结构低位 + 温和放量 + 拐头向上 + 近期贴过MA50
+        # 用来把"从下往上翻越型多头"和"高位脉冲加速型多头"分开，前者可先买一点
+        # dist ≤ 3% 是回放得出的准确率与期望值均改善的分割线，>3% 命中率骤降
+        bull_entry_ok = (
+            bull_align
+            and dist_ma50_pct <= 3.0
+            and 0.85 <= vol_ratio <= 1.9
+            and ma5_up
+            and support_tested
+        )
+
         if strict_buy:
             status = "★ 低位确认"
         elif trend_follow_ready or early_reversal_follow or early_bull_follow:
@@ -815,7 +826,13 @@ def analyze(symbol: str, name: str, as_of_date: str = None,
             "状态": status,
             "试探": probe,
             "突破": breakout,
+            "多头入场": "是" if bull_entry_ok else "",
         }
+        # 今日涨跌幅(现价 vs 昨收)——任何模式都产出，供持仓判断区分放量上涨/下跌
+        if len(close) >= 2:
+            _prev_close = close.iloc[-2]
+            if _prev_close > 0:
+                result["今日涨跌"] = round((c - _prev_close) / _prev_close * 100, 2)
         if assess:
             result["信号评估"] = assess
             result["风险等级"] = risk_tier
@@ -964,6 +981,11 @@ def check_holdings(df: pd.DataFrame) -> list:
         name = rec["ETF名称"]
         fund = rec["联接基金"]
 
+        # agent 综合判断(--llm 时才有)：持有维度建议 + 理由，稍后附到本轮 alert 上
+        _agent_hold = row.get("Agent持有", "")
+        _agent_reason = row.get("Agent理由", "")
+        _prev_n = len(alerts)
+
         # 跌破MA50 → 止损警告
         dist_str = row.get("距MA50", "+0%")
         dist_val = _parse_dist(dist_str)
@@ -1023,10 +1045,11 @@ def check_holdings(df: pd.DataFrame) -> list:
             # 注意：这里用"状态是否已知"判断异常，不用 rank 阈值——
             #       STATUS_ORDER 增删枚举会改变各状态的 rank，硬编码数字会误伤。
             vol_ratio = float(row.get("量比", 0) or 0)
+            today_chg = float(row.get("今日涨跌", 0) or 0)
             confirmed_breakdown = (
                 cur_status not in _STATUS_RANK              # 状态异常/未知，保守止损
                 or dist_val <= -3                           # 已明显跌破MA50(超3%)
-                or (dist_val < 0 and vol_ratio >= 1.5)      # 放量跌破MA50
+                or (dist_val < 0 and vol_ratio >= 1.5 and today_chg < 0)  # 放量且今日下跌才算破位
             )
             if confirmed_breakdown:
                 alerts.append({
@@ -1080,18 +1103,36 @@ def check_holdings(df: pd.DataFrame) -> list:
                 "建议": "短线转强但中期趋势未确认，如要参与只先买一点",
             })
         elif cur_status == "□ 多头排列":
+            entry_ok = str(row.get("多头入场", "")) == "是"
+            vol_ratio = float(row.get("量比", 0) or 0)
+            ma5_up_row = row.get("MA5拐头") == "↑"
             if dist_val < 5:
                 tier = "低位"
             elif dist_val < 10:
                 tier = "追涨"
             else:
                 tier = "高位博弈"
-            alerts.append({
-                "基金": fund, "ETF": name, "级别": "🟢 加仓",
-                "信号变化": f"{buy_status} → {cur_status}",
-                "距MA50": dist_str, "风险等级": tier,
-                "建议": f"多头排列，可以再买一点 [{tier}]",
-            })
+            if entry_ok:
+                alerts.append({
+                    "基金": fund, "ETF": name, "级别": "🟢 加仓",
+                    "信号变化": f"{buy_status} → {cur_status}",
+                    "距MA50": dist_str, "风险等级": tier,
+                    "建议": f"多头排列且回踩确认，可以再买一点 [{tier}]",
+                })
+            elif dist_val <= 6 and ma5_up_row and 0.85 <= vol_ratio <= 2.0:
+                alerts.append({
+                    "基金": fund, "ETF": name, "级别": "🔵 持有",
+                    "信号变化": f"{buy_status} → {cur_status}",
+                    "距MA50": dist_str, "风险等级": tier,
+                    "建议": f"多头排列但未回踩MA50，持有为主，等回踩再补 [{tier}]",
+                })
+            else:
+                alerts.append({
+                    "基金": fund, "ETF": name, "级别": "🔵 持有",
+                    "信号变化": f"{buy_status} → {cur_status}",
+                    "距MA50": dist_str, "风险等级": tier,
+                    "建议": f"多头排列但已{tier}或量能异常，持有为主，不建议追加",
+                })
         elif cur_status == "▲ 接近支撑" and row.get("MA5拐头") == "↑":
             alerts.append({
                 "基金": fund, "ETF": name, "级别": "🟢 加仓",
@@ -1107,6 +1148,13 @@ def check_holdings(df: pd.DataFrame) -> list:
                 "距MA50": dist_str,
                 "建议": "持有观望",
             })
+
+        # 把本轮新增的 alert 都补上 agent 综合判断(有则填，无则留空不影响原有渲染)
+        for _a in alerts[_prev_n:]:
+            if _agent_hold:
+                _a["Agent持有"] = _agent_hold
+            if _agent_reason:
+                _a["Agent理由"] = _agent_reason
 
     return alerts
 
@@ -1383,7 +1431,11 @@ def main():
     df["池子"] = df["池子key"].map(ETF_BUCKET_LABELS).fillna("主题观察池")
     actionable_statuses = {"★ 低位确认", "◆ 趋势跟随", "◇ 转强初期", "▲ 接近支撑"}
     if args.llm:
-        actionable_codes = [str(code) for code in df[df["状态"].isin(actionable_statuses)]["代码"].tolist()]
+        # 买入候选 + 当前持仓 都送 agent：持仓票无论当前状态如何都要拿到综合判断
+        _held_for_llm = _held_codes()
+        _codes = {str(code) for code in df[df["状态"].isin(actionable_statuses)]["代码"].tolist()}
+        _codes |= {c for c in _held_for_llm if c in set(df["代码"].astype(str))}
+        actionable_codes = sorted(_codes)
         cli_rows = _run_etf_agent_cli(actionable_codes)
     else:
         cli_rows = {}
@@ -1402,14 +1454,14 @@ def main():
     if args.morning:
         show_cols = ["池子", "代码", "名称", "现价", "昨收", "开盘涨跌", "早盘涨跌", "早盘量能",
                      "距MA50", "量比", "MA5拐头", "状态", *agent_cols,
-                     "突破", "试探", "信号评估", "场外基金"]
+                     "多头入场", "突破", "试探", "信号评估", "场外基金"]
     elif args.detail:
         show_cols = ["池子", "代码", "名称", "现价", "MA5", "MA10", "MA20", "MA50", "MA100",
                      "距MA50", "量比", "回踩MA50", "MA5拐头", "状态", *agent_cols,
-                     "突破", "试探", "风险等级", "信号评估", "场外基金"]
+                     "多头入场", "突破", "试探", "风险等级", "信号评估", "场外基金"]
     else:
         show_cols = ["池子", "代码", "名称", "现价", "距MA50", "量比", "MA5拐头", "状态",
-                     *agent_cols, "突破", "试探", "风险等级", "信号评估", "场外基金"]
+                     *agent_cols, "多头入场", "突破", "试探", "风险等级", "信号评估", "场外基金"]
 
     valid_cols = [c for c in show_cols if c in df.columns]
 
@@ -1434,6 +1486,9 @@ def main():
         # "试探"列只在"接近支撑"分组显示
         if status_label != "▲ 接近支撑":
             cols = [c for c in cols if c != "试探"]
+        # "多头入场"列只在"多头排列"分组显示
+        if status_label != "□ 多头排列":
+            cols = [c for c in cols if c != "多头入场"]
         # "突破"列只在有突破标记的分组显示
         if "突破" in group.columns and group["突破"].astype(str).str.len().max() == 0:
             cols = [c for c in cols if c != "突破"]
@@ -1500,6 +1555,9 @@ def main():
         for a in alerts:
             print(f"  {a['级别']} {a['ETF']}({a['基金']})")
             print(f"     {a['信号变化']}  距MA50 {a['距MA50']}  → {a['建议']}")
+            if a.get("Agent持有"):
+                print(f"     🤖 Agent 综合: {a['Agent持有']}"
+                      + (f" ｜{a['Agent理由']}" if a.get("Agent理由") else ""))
 
     # ===== 定投模块 =====
     dca_win, dca_items = dca_advice()
@@ -1741,7 +1799,9 @@ def save_xhs_log(df: pd.DataFrame, counts: dict, holding_alerts: list = None, co
         lines.append("—" * 20)
         lines.append("💪 多头排列（趋势健康，持有为主）：")
         for _, row in bull.iterrows():
-            lines.append(f"   □ {row['名称']} {row.get('现价','')} ｜距MA50 {row.get('距MA50','')}")
+            entry_ok = str(row.get("多头入场", "")) == "是"
+            entry_tag = "  ◎ 可先买一点" if entry_ok else ""
+            lines.append(f"   □ {row['名称']} {row.get('现价','')} ｜距MA50 {row.get('距MA50','')}{entry_tag}")
         lines.append("")
 
     # 趋势完好
@@ -1776,6 +1836,9 @@ def save_xhs_log(df: pd.DataFrame, counts: dict, holding_alerts: list = None, co
             lines.append(f"   {a['级别']} {a['ETF']}（{a['基金']}）")
             lines.append(f"     {a['信号变化']}  距MA50 {a['距MA50']}")
             lines.append(f"     → {a['建议']}")
+            if a.get("Agent持有"):
+                lines.append(f"     🤖 Agent 综合: {a['Agent持有']}"
+                             + (f" ｜{a['Agent理由']}" if a.get("Agent理由") else ""))
         lines.append("")
 
     # 定投模块(脱敏：不显示金额)
@@ -2022,7 +2085,17 @@ def notify_feishu(df: pd.DataFrame, counts: dict, compare_report: bool = False,
                 otc = OTC_FUND.get(row["代码"])
                 fund_str = f"  →  {otc[0]} {otc[1]}" if otc else ""
                 bucket_tag = f"[{row.get('池子', '')}] "
-                lines.append(f"□ {bucket_tag}{row['名称']}{fund_str}")
+                entry_ok = str(row.get("多头入场", "")) == "是"
+                held = bool(row.get("已持仓"))
+                dist_val_row = _parse_dist(row.get("距MA50", ""))
+                if entry_ok and not held:
+                    tier = "低位" if dist_val_row < 5 else "追涨"
+                    entry_tag = f"  ◎ 可先买一点 [{tier}]"
+                elif entry_ok and held:
+                    entry_tag = "  ◎ 回踩确认，可加仓一点"
+                else:
+                    entry_tag = ""
+                lines.append(f"□ {bucket_tag}{row['名称']}{entry_tag}{fund_str}")
             elements.append({
                 "tag": "div",
                 "text": {
@@ -2070,10 +2143,14 @@ def notify_feishu(df: pd.DataFrame, counts: dict, compare_report: bool = False,
             elements.append({"tag": "hr"})
             lines = ["**📊 持仓监控**"]
             for a in holding_alerts:
+                _agent_line = ""
+                if a.get("Agent持有"):
+                    _agent_line = f"\n🤖 Agent 综合: {a['Agent持有']}" + (
+                        f" ｜{a['Agent理由']}" if a.get("Agent理由") else "")
                 lines.append(
                     f"{a['级别']} **{a['ETF']}**  "
                     f"{a['信号变化']}  距MA50 {a['距MA50']}\n"
-                    f"→ {a['建议']}"
+                    f"→ {a['建议']}{_agent_line}"
                 )
             elements.append({
                 "tag": "div",

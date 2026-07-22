@@ -205,11 +205,12 @@ class TestHeldCodes(unittest.TestCase):
 
 
 def _df_row(code, status, dist, name="测试ETF", vol=1.0, ma5turn="↑",
-            price=1.0, ma5=0.9, ma10=0.9):
+            price=1.0, ma5=0.9, ma10=0.9, today_chg=0.0):
     """构造 check_holdings 需要的最小 df 行。"""
     return {
         "代码": code, "名称": name, "状态": status, "距MA50": dist,
         "量比": vol, "MA5拐头": ma5turn, "现价": price, "MA5": ma5, "MA10": ma10,
+        "今日涨跌": today_chg,
     }
 
 
@@ -264,12 +265,21 @@ class TestCheckHoldings(unittest.TestCase):
         self.assertEqual(alerts[0]["级别"], "🔴 止损")
 
     def test_weak_volume_break_is_stoploss(self):
-        # 趋势偏弱 + 放量(量比>=1.5)跌破 → 🔴 止损
+        # 趋势偏弱 + 放量(量比>=1.5) + 今日下跌 → 🔴 止损
         alerts = self._run(
             [_rec("562500", shares=1000)],
-            [_df_row("562500", "✗ 趋势偏弱", "-1.0%", vol=1.8)],
+            [_df_row("562500", "✗ 趋势偏弱", "-1.0%", vol=1.8, today_chg=-1.5)],
         )
         self.assertEqual(alerts[0]["级别"], "🔴 止损")
+
+    def test_weak_volume_rebound_is_stoploss_watch(self):
+        # 趋势偏弱 + 放量 + 浅破 + 今日上涨(放量反弹回踩，非破位) → 🟠 止损观察
+        # 复现 510300 场景：现价在 MA50 下方、量比>=1.5，但今天是大涨反弹，不应喊止损
+        alerts = self._run(
+            [_rec("510300", shares=1000)],
+            [_df_row("510300", "✗ 趋势偏弱", "-2.0%", vol=1.6, today_chg=2.9)],
+        )
+        self.assertEqual(alerts[0]["级别"], "🟠 止损观察")
 
     def test_row_missing_skipped(self):
         # 持仓票不在当日扫描 df 中 → 跳过，不报错

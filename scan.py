@@ -1002,6 +1002,48 @@ def _parse_dist(dist_str) -> float:
         return 0.0
 
 
+# ===== C组合止损参数(经 tools/stoploss_backtest.py 近2年回测+样本外验证: P7/C-5) =====
+# 目的：解决"刚买就止损/联接C来回折腾吃赎回费"。买入后保护期内不硬砍(除非放量破位)，
+# 且相对买入成本亏损未到阈值不硬砍。保护期与C类惩罚性赎回费窗口(7天)对齐。
+HOLD_PROTECT_DAYS = 7       # 买入后N个自然日内不触发硬止损(除非放量破位)
+COST_STOP_PCT = -5.0        # 相对买入成本亏损超过该阈值(%)才允许硬止损
+
+
+def _hold_days(rec: dict) -> int:
+    """持有自然日数(距最近一笔买入)。无法解析时返回大数,视为已过保护期(不阻断止损)。"""
+    ts = rec.get("时间", "")
+    try:
+        buy_dt = datetime.strptime(str(ts)[:10], "%Y-%m-%d")
+        return (datetime.now() - buy_dt).days
+    except (ValueError, TypeError):
+        return 9999
+
+
+def _cost_pnl_pct(code: str, rec: dict, cur_price: float) -> float | None:
+    """相对买入成本的盈亏%。成本基准 = 买入日该ETF缓存收盘价(与现价同基准)。
+
+    不能直接用 rec['净值'](那是联接基金净值,与ETF现价不同基准会算出错值)。
+    取不到买入日缓存价时返回 None,调用方据此跳过成本闸门(保守放行止损)。
+    """
+    if cur_price <= 0:
+        return None
+    path = get_cache_path(str(code))
+    if not path.exists():
+        return None
+    try:
+        hist = pd.read_csv(path)
+        buy_day = str(rec.get("时间", ""))[:10]
+        hit = hist[hist["date"].astype(str).str[:10] == buy_day]
+        if hit.empty:
+            return None
+        cost = float(hit["close"].iloc[-1])
+        if cost <= 0:
+            return None
+        return (cur_price / cost - 1) * 100
+    except (OSError, ValueError, KeyError):
+        return None
+
+
 def check_holdings(df: pd.DataFrame) -> list:
     """检查持仓信号变化，返回预警列表"""
     holdings = _load_holdings()
@@ -1090,12 +1132,34 @@ def check_holdings(df: pd.DataFrame) -> list:
                 or dist_val <= -3                           # 已明显跌破MA50(超3%)
                 or (dist_val < 0 and vol_ratio >= 1.5 and today_chg < 0)  # 放量且今日下跌才算破位
             )
-            if confirmed_breakdown:
+            # C组合两道人性化闸门(P7/C-5)：避免"刚买就割"和C类来回折腾吃赎回费。
+            # 放量破位(量比>=1.5且今日下跌)属于急跌,任何时候都放行硬止损,不受闸门保护。
+            vol_breakdown = vol_ratio >= 1.5 and today_chg < 0
+            hold_days = _hold_days(rec)
+            cost_pnl = _cost_pnl_pct(code, rec, price)
+            in_protect = hold_days < HOLD_PROTECT_DAYS               # 闸门1:保护期内
+            cost_ok = cost_pnl is not None and cost_pnl > COST_STOP_PCT  # 闸门2:亏损未到-5%
+            gated = confirmed_breakdown and not vol_breakdown and (in_protect or cost_ok)
+
+            if confirmed_breakdown and not gated:
                 alerts.append({
                     "基金": fund, "ETF": name, "级别": "🔴 止损",
                     "信号变化": f"{buy_status} → {cur_status}",
                     "距MA50": dist_str,
                     "建议": "趋势走坏(明显跌破MA50或放量破位)，建议止损",
+                })
+            elif gated:
+                # 位置已破位,但被保护期/成本线拦下——降级为观察,说明拦截原因。
+                # gated 为真时:要么在保护期内,要么 cost_ok(此时 cost_pnl 必非 None)。
+                if in_protect:
+                    why = f"持有{hold_days}天(<{HOLD_PROTECT_DAYS}天保护期)"
+                else:
+                    why = f"浮亏{cost_pnl:+.1f}%(未破{COST_STOP_PCT}%成本线)"
+                alerts.append({
+                    "基金": fund, "ETF": name, "级别": "🟠 止损观察",
+                    "信号变化": f"{buy_status} → {cur_status}",
+                    "距MA50": dist_str,
+                    "建议": f"位置转弱但{why}，先持有观察；放量破位或跌破成本线再止损",
                 })
             else:
                 alerts.append({

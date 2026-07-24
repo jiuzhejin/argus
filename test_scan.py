@@ -97,7 +97,7 @@ class TestParseDist(unittest.TestCase):
 
 
 def _rec(code, name="测试ETF", fund="000000", typ="买入",
-         amount=None, nav=None, shares=None):
+         amount=None, nav=None, shares=None, when=None):
     """构造一条交易记录(字段与 trade_records.json 对齐)。"""
     r = {"ETF代码": code, "ETF名称": name, "联接基金": fund, "类型": typ}
     if amount is not None:
@@ -106,6 +106,8 @@ def _rec(code, name="测试ETF", fund="000000", typ="买入",
         r["净值"] = nav
     if shares is not None:
         r["份额"] = shares
+    if when is not None:
+        r["时间"] = when
     return r
 
 
@@ -288,6 +290,140 @@ class TestCheckHoldings(unittest.TestCase):
             [_df_row("510300", "▲ 接近支撑", "+0.4%")],
         )
         self.assertEqual(alerts, [])
+
+
+class TestCComboStopLoss(unittest.TestCase):
+    """C组合止损闸门(P7/C-5): 持有保护期 + 成本止损线。
+
+    验证"刚买就割/联接C来回折腾吃赎回费"的修复:
+    - 保护期内(<7天)缩量破位 → 降级🟠(不硬砍),除非放量破位;
+    - 过保护期后浮亏未破-5% → 仍🟠;跌破-5% → 🔴;
+    - 放量破位任何时候都放行🔴(急跌不受保护)。
+    闸门只在能拿到买入日期/成本价时介入,数据缺失时保守放行止损(向后兼容)。
+    _hold_days / _cost_pnl_pct 用 mock 注入以保证判定确定、不依赖真实时钟与缓存。
+    """
+
+    def _run(self, records, rows, hold_days, cost_pnl):
+        df = pd.DataFrame(rows)
+        fake_path = mock.Mock()
+        fake_path.exists.return_value = True
+        with mock.patch.object(scan, "RECORDS_PATH", fake_path), \
+             mock.patch("record._load_records", return_value=records), \
+             mock.patch.object(scan, "_hold_days", return_value=hold_days), \
+             mock.patch.object(scan, "_cost_pnl_pct", return_value=cost_pnl):
+            return scan.check_holdings(df)
+
+    def test_in_protect_shallow_break_downgraded(self):
+        # 科创50场景:持有2天(<7)+深破位(-3.8%缩量)+浮亏浅 → 被保护期拦下,降🟠
+        alerts = self._run(
+            [_rec("011613", shares=1000, when="2026-07-22 15:00")],
+            [_df_row("011613", "✗ 趋势偏弱", "-3.8%", vol=0.5, today_chg=-0.1)],
+            hold_days=2, cost_pnl=-3.2,
+        )
+        self.assertEqual(alerts[0]["级别"], "🟠 止损观察")
+        self.assertIn("保护期", alerts[0]["建议"])
+
+    def test_in_protect_volume_break_still_stoploss(self):
+        # 保护期内但放量破位(量比1.8+今日下跌) → 急跌不受保护,仍🔴
+        alerts = self._run(
+            [_rec("011613", shares=1000, when="2026-07-22 15:00")],
+            [_df_row("011613", "✗ 趋势偏弱", "-3.8%", vol=1.8, today_chg=-2.0)],
+            hold_days=2, cost_pnl=-3.2,
+        )
+        self.assertEqual(alerts[0]["级别"], "🔴 止损")
+
+    def test_past_protect_shallow_loss_downgraded(self):
+        # 过保护期(10天)+深破位缩量,但浮亏仅-3%(未破-5%成本线) → 降🟠
+        alerts = self._run(
+            [_rec("562500", shares=1000, when="2026-07-01 15:00")],
+            [_df_row("562500", "✗ 趋势偏弱", "-4.0%", vol=0.6, today_chg=-0.2)],
+            hold_days=10, cost_pnl=-3.0,
+        )
+        self.assertEqual(alerts[0]["级别"], "🟠 止损观察")
+        self.assertIn("成本线", alerts[0]["建议"])
+
+    def test_past_protect_deep_loss_is_stoploss(self):
+        # 过保护期(10天)+深破位+浮亏跌破-5%成本线 → 🔴 止损
+        alerts = self._run(
+            [_rec("562500", shares=1000, when="2026-07-01 15:00")],
+            [_df_row("562500", "✗ 趋势偏弱", "-4.0%", vol=0.6, today_chg=-0.2)],
+            hold_days=10, cost_pnl=-6.0,
+        )
+        self.assertEqual(alerts[0]["级别"], "🔴 止损")
+
+    def test_missing_cost_past_protect_falls_through_to_stoploss(self):
+        # 成本价查不到(cost_pnl=None)+过保护期+深破位 → 保守放行🔴(向后兼容)
+        alerts = self._run(
+            [_rec("562500", shares=1000, when="2026-07-01 15:00")],
+            [_df_row("562500", "✗ 趋势偏弱", "-5.0%", vol=1.0)],
+            hold_days=10, cost_pnl=None,
+        )
+        self.assertEqual(alerts[0]["级别"], "🔴 止损")
+
+    def test_shallow_non_breakdown_unaffected(self):
+        # 浅破(-2.2%)缩量本就不是confirmed_breakdown → 走原🟠文案,闸门不介入
+        alerts = self._run(
+            [_rec("562500", shares=1000, when="2026-07-22 15:00")],
+            [_df_row("562500", "✗ 趋势偏弱", "-2.2%", vol=1.0, ma5turn="↓")],
+            hold_days=2, cost_pnl=-1.0,
+        )
+        self.assertEqual(alerts[0]["级别"], "🟠 止损观察")
+
+
+class TestHoldDays(unittest.TestCase):
+    """_hold_days: 持有自然日;无法解析日期时返回大数(视为已过保护期,不阻断止损)。"""
+
+    def test_parses_recent_date(self):
+        today = datetime.now().strftime("%Y-%m-%d")
+        self.assertEqual(scan._hold_days({"时间": f"{today} 15:00"}), 0)
+
+    def test_counts_days(self):
+        past = (datetime.now() - timedelta(days=5)).strftime("%Y-%m-%d")
+        self.assertEqual(scan._hold_days({"时间": f"{past} 15:00"}), 5)
+
+    def test_missing_time_returns_large(self):
+        self.assertEqual(scan._hold_days({}), 9999)
+
+    def test_garbage_time_returns_large(self):
+        self.assertEqual(scan._hold_days({"时间": "not-a-date"}), 9999)
+
+
+class TestCostPnl(unittest.TestCase):
+    """_cost_pnl_pct: 成本盈亏%,成本基准=买入日ETF缓存收盘价(非联接净值)。"""
+
+    def _fake_cache(self, tmp, code, buy_day, close):
+        pd.DataFrame({"date": [buy_day], "close": [close]}).to_csv(
+            tmp / f"{code}.csv", index=False)
+
+    def test_uses_buy_day_close(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            self._fake_cache(tmp, "588000", "2026-07-22", 1.955)
+            with mock.patch.object(scan, "get_cache_path",
+                                   side_effect=lambda c: tmp / f"{c}.csv"):
+                # 现价1.892 vs 买入日收盘1.955 → -3.22%
+                pnl = scan._cost_pnl_pct("588000", {"时间": "2026-07-22 15:00"}, 1.892)
+        self.assertAlmostEqual(pnl, -3.22, places=1)
+
+    def test_missing_cache_returns_none(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            with mock.patch.object(scan, "get_cache_path",
+                                   side_effect=lambda c: tmp / f"{c}.csv"):
+                self.assertIsNone(scan._cost_pnl_pct("NOPE", {"时间": "2026-07-22"}, 1.0))
+
+    def test_buy_day_not_in_cache_returns_none(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            self._fake_cache(tmp, "588000", "2026-07-22", 1.955)
+            with mock.patch.object(scan, "get_cache_path",
+                                   side_effect=lambda c: tmp / f"{c}.csv"):
+                # 买入日不在缓存(如停牌/数据缺口) → None,调用方保守放行止损
+                pnl = scan._cost_pnl_pct("588000", {"时间": "2020-01-01 15:00"}, 1.892)
+        self.assertIsNone(pnl)
+
+    def test_zero_price_returns_none(self):
+        self.assertIsNone(scan._cost_pnl_pct("588000", {"时间": "2026-07-22"}, 0))
 
 
 class TestCriticalWatchEval(unittest.TestCase):

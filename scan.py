@@ -18,7 +18,6 @@ Argus - ETF 均线信号扫描器
   .venv/bin/python scan.py              # 扫描全部(显示完整指标)
   .venv/bin/python scan.py --refresh    # 强制刷新缓存
   .venv/bin/python scan.py --no-xhs     # 不生成小红书日志(盘中模式)
-  .venv/bin/python scan.py --compare    # 与盘中快照对比(盘后模式)
   .venv/bin/python scan.py --morning    # 早盘分析(实时数据，不缓存)
   .venv/bin/python scan.py --code 512480 # 查询单只ETF的分析信息
 """
@@ -364,30 +363,6 @@ def save_cache(symbol: str, df: pd.DataFrame):
         today_str = datetime.now().strftime("%Y-%m-%d")
         df = df[df["date"].astype(str).str[:10] < today_str]
     df.to_csv(get_cache_path(symbol), index=False)
-
-
-SNAPSHOT_DIR = Path(__file__).parent / ".cache"
-
-
-def save_snapshot(results: list, tag: str):
-    """保存扫描结果快照(用于盘中/盘后对比)"""
-    date_tag = datetime.now().strftime("%Y%m%d")
-    path = SNAPSHOT_DIR / f"snapshot_{date_tag}_{tag}.json"
-    SNAPSHOT_DIR.mkdir(exist_ok=True)
-    path.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def load_snapshot(tag: str) -> list | None:
-    """加载指定快照"""
-    date_tag = datetime.now().strftime("%Y%m%d")
-    path = SNAPSHOT_DIR / f"snapshot_{date_tag}_{tag}.json"
-    if not path.exists():
-        return None
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        print(f"  ⚠ 快照文件损坏: {path.name}")
-        return None
 
 
 def _market_prefix(symbol: str) -> str:
@@ -1450,7 +1425,6 @@ def main():
     parser = argparse.ArgumentParser(description="Argus ETF 均线信号扫描器")
     parser.add_argument("--refresh", action="store_true", help="强制刷新缓存")
     parser.add_argument("--no-xhs", action="store_true", help="不生成小红书日志(盘中模式)")
-    parser.add_argument("--compare", action="store_true", help="与盘中快照对比(盘后模式)")
     parser.add_argument("--morning", action="store_true", help="早盘分析(实时数据，不缓存)")
     parser.add_argument("--llm", action="store_true", help="调用 etf-agent CLI 做二次判断（默认关闭）")
     parser.add_argument("--code", metavar="CODE", help="查询单只ETF的分析信息(股票代码)")
@@ -1665,21 +1639,13 @@ def main():
     dca_win, dca_items = dca_advice()
     _render_dca(dca_win, dca_items)
 
-    # ===== 保存快照 =====
-    snapshot_tag = "morning" if args.morning else ("intraday" if _is_trading_hours() else "close")
-    save_snapshot(results, snapshot_tag)
-
     # ===== 小红书格式日志 =====
     if not args.no_xhs and not args.morning:
-        save_xhs_log(df, counts, holding_alerts=alerts, compare=args.compare,
+        save_xhs_log(df, counts, holding_alerts=alerts,
                      dca=(dca_win, dca_items))
 
-    # ===== 尾盘对比 =====
-    if args.compare:
-        compare_with_intraday(df, counts)
-
     # ===== 飞书推送 =====
-    notify_feishu(df, counts, compare_report=args.compare, holding_alerts=alerts,
+    notify_feishu(df, counts, holding_alerts=alerts,
                   morning=args.morning, dca=(dca_win, dca_items))
 
     # ===== 写入日志文件 =====
@@ -1692,92 +1658,7 @@ def main():
     print(f"  📝 日志已保存: {log_path.name}")
 
 
-def compare_with_intraday(df_close: pd.DataFrame, counts_close: dict):
-    """对比盘后(15:30)与盘中(14:45)扫描结果"""
-    intraday = load_snapshot("intraday")
-    if not intraday:
-        print("\n  ⚠ 未找到盘中快照，跳过对比")
-        return
-
-    intra_map = {r["代码"]: r for r in intraday}
-
-    print(f"\n{'='*60}")
-    print("  🔍 尾盘对比 (14:45 vs 15:00)")
-    print(f"{'='*60}")
-
-    changes = []
-    for _, row in df_close.iterrows():
-        code = row["代码"]
-        intra = intra_map.get(code)
-        if not intra:
-            continue
-
-        price_now = row.get("现价")
-        price_intra = intra.get("现价")
-        status_now = row.get("状态", "")
-        status_intra = intra.get("状态", "")
-        vol_now = row.get("量比")
-        vol_intra = intra.get("量比")
-
-        # 跳过数据异常的
-        if price_now is None or price_intra is None:
-            continue
-
-        price_chg = (price_now - price_intra) / price_intra * 100
-        status_changed = status_now != status_intra
-        vol_chg = (vol_now - vol_intra) if vol_now and vol_intra else 0
-
-        # 只记录有意义的变化: 价格变动>0.3% 或 信号变化
-        if abs(price_chg) >= 0.3 or status_changed:
-            change = {
-                "名称": row["名称"],
-                "代码": code,
-                "盘中价": round(price_intra, 3),
-                "收盘价": round(price_now, 3),
-                "涨跌": f"{price_chg:+.2f}%",
-                "量比变化": f"{vol_intra}→{vol_now}",
-            }
-            if status_changed:
-                change["信号变化"] = f"{status_intra} → {status_now}"
-            else:
-                change["信号变化"] = "—"
-            changes.append(change)
-
-    if not changes:
-        print("  尾盘无显著变化，行情平稳收尾\n")
-        return
-
-    # 按价格变动排序
-    changes.sort(key=lambda x: abs(float(x["涨跌"].rstrip("%"))), reverse=True)
-
-    cdf = pd.DataFrame(changes)
-    show_cols = ["名称", "盘中价", "收盘价", "涨跌", "量比变化", "信号变化"]
-    valid = [c for c in show_cols if c in cdf.columns]
-    print(cdf[valid].to_string(index=False))
-
-    # 统计
-    signal_flips = [c for c in changes if c["信号变化"] != "—"]
-    big_moves = [c for c in changes if abs(float(c["涨跌"].rstrip("%"))) >= 1.0]
-
-    print(f"\n{'─'*60}")
-    print(f"  尾盘异动: {len(changes)} 只  "
-          f"信号翻转: {len(signal_flips)} 只  "
-          f"大幅波动(≥1%): {len(big_moves)} 只")
-
-    if signal_flips:
-        print("  ⚠ 信号翻转:")
-        for c in signal_flips:
-            print(f"    {c['名称']}: {c['信号变化']}")
-
-    if big_moves:
-        print("  ⚠ 大幅波动:")
-        for c in big_moves:
-            print(f"    {c['名称']}: {c['涨跌']}")
-
-    print()
-
-
-def save_xhs_log(df: pd.DataFrame, counts: dict, holding_alerts: list = None, compare: bool = False,
+def save_xhs_log(df: pd.DataFrame, counts: dict, holding_alerts: list = None,
                  dca: tuple = None):
     """生成小红书风格的扫描日志"""
     today = datetime.now().strftime("%m-%d")
@@ -1964,30 +1845,6 @@ def save_xhs_log(df: pd.DataFrame, counts: dict, holding_alerts: list = None, co
         lines.extend(_dca_lines(dca[0], dca[1], mask_amount=True))
         lines.append("")
 
-    # 尾盘对比
-    if compare:
-        intraday = load_snapshot("intraday")
-        if intraday:
-            intra_map = {r["代码"]: r for r in intraday}
-            flips, big = [], []
-            for _, row in df.iterrows():
-                intra = intra_map.get(row["代码"])
-                if not intra or intra.get("现价") is None or row.get("现价") is None:
-                    continue
-                pchg = (row["现价"] - intra["现价"]) / intra["现价"] * 100
-                if row.get("状态") != intra.get("状态"):
-                    flips.append(f"{row['名称']}: {intra['状态']} → {row['状态']}")
-                if abs(pchg) >= 1.0:
-                    big.append(f"{row['名称']} {pchg:+.2f}%")
-            if flips or big:
-                lines.append("—" * 20)
-                lines.append("🔍 尾盘对比（14:45 vs 收盘）：")
-                if flips:
-                    lines.append("   信号翻转: " + "；".join(flips))
-                if big:
-                    lines.append("   大幅波动: " + "；".join(big))
-                lines.append("")
-
     # 尾部
     lines.append("—" * 20)
     lines.append("📌 信号说明：")
@@ -2008,7 +1865,7 @@ def save_xhs_log(df: pd.DataFrame, counts: dict, holding_alerts: list = None, co
     print(f"  📕 小红书日志已保存: {log_path.name}")
 
 
-def notify_feishu(df: pd.DataFrame, counts: dict, compare_report: bool = False,
+def notify_feishu(df: pd.DataFrame, counts: dict,
                   holding_alerts: list = None, morning: bool = False, dca: tuple = None):
     """推送扫描摘要到飞书(消息卡片)"""
     env_path = Path(__file__).parent / ".env"
@@ -2317,36 +2174,6 @@ def notify_feishu(df: pd.DataFrame, counts: dict, compare_report: bool = False,
                 "tag": "div",
                 "text": {"tag": "lark_md", "content": "\n".join(lines)},
             })
-
-        # 尾盘对比摘要
-        if compare_report:
-            intraday = load_snapshot("intraday")
-            if intraday:
-                intra_map = {r["代码"]: r for r in intraday}
-                flips, big = [], []
-                for _, row in df.iterrows():
-                    intra = intra_map.get(row["代码"])
-                    if not intra or intra.get("现价") is None or row.get("现价") is None:
-                        continue
-                    pchg = (row["现价"] - intra["现价"]) / intra["现价"] * 100
-                    if row.get("状态") != intra.get("状态"):
-                        flips.append(f"{row['名称']}: {intra['状态']} → {row['状态']}")
-                    if abs(pchg) >= 1.0:
-                        big.append(f"{row['名称']} {pchg:+.2f}%")
-
-                if flips or big:
-                    elements.append({"tag": "hr"})
-                    lines = ["**🔍 尾盘对比 (14:45 vs 收盘)**"]
-                    if flips:
-                        lines.append("信号翻转: " + "；".join(flips))
-                    if big:
-                        lines.append("大幅波动: " + "；".join(big))
-                    if not flips and not big:
-                        lines.append("尾盘平稳，无显著异动")
-                    elements.append({
-                        "tag": "div",
-                        "text": {"tag": "lark_md", "content": "\n".join(lines)},
-                    })
 
         # 早盘概览卡片
         if morning and "早盘涨跌" in df.columns:

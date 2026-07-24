@@ -41,12 +41,6 @@
 /Users/bytedance/argus/.venv/bin/python /Users/bytedance/argus/scan.py --morning
 ```
 
-### 盘后对比
-
-```bash
-/Users/bytedance/argus/.venv/bin/python /Users/bytedance/argus/scan.py --compare
-```
-
 ### 管理买入记录
 
 记录买入：
@@ -68,7 +62,6 @@
 - `scan` 或空输入：扫描全部 ETF
 - `code <CODE>` 或直接输入 6 位代码：执行单只 ETF 分析，并带 `--code <CODE>`
 - `morning`：执行早盘分析
-- `compare`：执行盘后对比
 - `refresh`：扫描时带 `--refresh`
 - `record buy <CODE> <DATE> [TIME]`：记录买入
 - `record list`：查看买入记录

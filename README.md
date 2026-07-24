@@ -49,7 +49,7 @@ Argus 是一个 ETF 均线信号扫描器，用来做 ETF 池扫描、单只 ETF
 查询单只 ETF：
 
 ```bash
-.venv/bin/python scan.py --code 512480 --no-cache
+.venv/bin/python scan.py --code 512480
 ```
 
 执行早盘分析：

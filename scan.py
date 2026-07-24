@@ -1451,7 +1451,6 @@ def main():
     parser.add_argument("--refresh", action="store_true", help="强制刷新缓存")
     parser.add_argument("--no-xhs", action="store_true", help="不生成小红书日志(盘中模式)")
     parser.add_argument("--compare", action="store_true", help="与盘中快照对比(盘后模式)")
-    parser.add_argument("--no-cache", action="store_true", help="不使用缓存，全部实时拉取")
     parser.add_argument("--morning", action="store_true", help="早盘分析(实时数据，不缓存)")
     parser.add_argument("--llm", action="store_true", help="调用 etf-agent CLI 做二次判断（默认关闭）")
     parser.add_argument("--code", metavar="CODE", help="查询单只ETF的分析信息(股票代码)")
@@ -1469,7 +1468,7 @@ def main():
                 code = etf_code
             else:
                 name = code
-        skip = args.no_cache or args.morning
+        skip = args.morning
         result = analyze(code, name, skip_cache=skip, morning=args.morning)
         if args.llm:
             cli_rows = _run_etf_agent_cli([code])
@@ -1507,7 +1506,7 @@ def main():
     cached_count = 0
     is_tty = sys.stdout.isatty()
     for i, (code, name) in enumerate(ETF_POOL):
-        skip = args.no_cache or args.morning
+        skip = args.morning
         was_cached = False if skip else is_cache_fresh(code)
         if was_cached:
             cached_count += 1

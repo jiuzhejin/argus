@@ -25,13 +25,12 @@
 可选参数：
 
 - `--refresh`：强制刷新缓存
-- `--no-cache`：不使用缓存，直接拉取实时数据
 - `--no-xhs`：盘中模式下不生成小红书日志
 
 ### 查询单只 ETF
 
 ```bash
-/Users/bytedance/argus/.venv/bin/python /Users/bytedance/argus/scan.py --code <CODE> --no-cache
+/Users/bytedance/argus/.venv/bin/python /Users/bytedance/argus/scan.py --code <CODE>
 ```
 
 `<CODE>` 可以是 ETF 代码，例如 `512480`；也可以是联接基金代码，例如 `004752`。
@@ -67,7 +66,7 @@
 常见用户意图与命令的对应关系：
 
 - `scan` 或空输入：扫描全部 ETF
-- `code <CODE>` 或直接输入 6 位代码：执行单只 ETF 分析，并带 `--code <CODE> --no-cache`
+- `code <CODE>` 或直接输入 6 位代码：执行单只 ETF 分析，并带 `--code <CODE>`
 - `morning`：执行早盘分析
 - `compare`：执行盘后对比
 - `refresh`：扫描时带 `--refresh`

@@ -233,14 +233,34 @@ class TestCheckHoldings(unittest.TestCase):
         with mock.patch.object(scan, "RECORDS_PATH", fake_path):
             self.assertEqual(scan.check_holdings(pd.DataFrame()), [])
 
-    def test_support_ma5_up_is_add(self):
-        # 接近支撑 + MA5拐头↑ + 低位 → 🟢 加仓
+    def test_support_ma5up_shrink_pullback_is_add(self):
+        # 接近支撑 + MA5↑ + 缩量(量比<1) + 价回踩(现价<MA5) → 🟢 加仓(缩量回踩低吸)
         alerts = self._run(
             [_rec("510300", shares=1000)],
-            [_df_row("510300", "▲ 接近支撑", "+0.4%", ma5turn="↑")],
+            [_df_row("510300", "▲ 接近支撑", "+0.4%", ma5turn="↑",
+                     vol=0.8, price=1.099, ma5=1.116)],
         )
         self.assertEqual(len(alerts), 1)
         self.assertEqual(alerts[0]["级别"], "🟢 加仓")
+        self.assertIn("缩量回踩", alerts[0]["建议"])
+
+    def test_support_ma5up_but_放量_is_hold(self):
+        # 接近支撑 + MA5↑ + 价回踩，但量比>=1(未缩量) → 🔵 持有(不喊加仓)
+        alerts = self._run(
+            [_rec("510300", shares=1000)],
+            [_df_row("510300", "▲ 接近支撑", "+0.4%", ma5turn="↑",
+                     vol=1.3, price=1.099, ma5=1.116)],
+        )
+        self.assertEqual(alerts[0]["级别"], "🔵 持有")
+
+    def test_support_ma5up_but_价站上MA5_is_hold(self):
+        # 接近支撑 + MA5↑ + 缩量，但价已站上MA5(非回踩,已反弹) → 🔵 持有
+        alerts = self._run(
+            [_rec("510300", shares=1000)],
+            [_df_row("510300", "▲ 接近支撑", "+0.4%", ma5turn="↑",
+                     vol=0.8, price=1.120, ma5=1.116)],
+        )
+        self.assertEqual(alerts[0]["级别"], "🔵 持有")
 
     def test_support_ma5_down_is_hold(self):
         # 接近支撑 + MA5拐头↓ → 🔵 持有观望(不喊补，也不喊止损)

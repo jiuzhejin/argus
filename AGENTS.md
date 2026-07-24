@@ -67,7 +67,7 @@
 - `record buy <CODE> <DATE> [TIME]`：记录买入
 - `record list`：查看买入记录
 
-## 持仓止损逻辑
+## 持仓止损 / 加仓逻辑
 
 持仓监控(`check_holdings`)在信号转「✗ 趋势偏弱」且确认破位时才提示止损，并有两道保护闸门(经回测+样本外验证 P7/C-5)：
 
@@ -77,3 +77,9 @@
 
 被闸门拦下的降级为 🟠 止损观察。分批买入按最后一笔买入的日期/成本计算。
 参数常量见 `scan.py` 的 `HOLD_PROTECT_DAYS` / `COST_STOP_PCT`；回测脚本见 `tools/stoploss_backtest.py`。
+
+加仓提示只在「缩量回踩低吸」形态触发(经回测+3段样本外验证)：
+
+- 「▲ 接近支撑 + MA5↑」时，仅当 **量比 < 1(缩量)** 且 **现价 < MA5(回踩)** 才提示 🟢 加仓，其余降级 🔵 持有观察。
+- 该组合 D+5 胜率显著高于「仅 MA5↑」，且要求价<MA5 天然规避「MA5 窗口滚动假拐头」误判。
+- 参数常量 `ADD_VOL_RATIO_MAX`；回测脚本见 `tools/entry_reverse_explore.py`。

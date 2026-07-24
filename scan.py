@@ -981,6 +981,12 @@ def _parse_dist(dist_str) -> float:
 HOLD_PROTECT_DAYS = 7       # 买入后N个自然日内不触发硬止损(除非放量破位)
 COST_STOP_PCT = -5.0        # 相对买入成本亏损超过该阈值(%)才允许硬止损
 
+# ===== 加仓判据参数(经 tools/entry_reverse_explore.py 近2年+3段样本外验证) =====
+# ▲接近支撑 只在"缩量回踩低吸"形态才主动喊加仓，其余降级持有观察。
+# 回测显示 缩量(量比<1) + 价回踩(现价<MA5) 组合 D+5 胜率显著高于全部触发点，
+# 且三段样本外方向一致；也天然修掉"MA5窗口滚动假拐头"误判(要求价<MA5)。
+ADD_VOL_RATIO_MAX = 1.0     # 加仓要求缩量：量比 < 该值
+
 
 def _hold_days(rec: dict) -> int:
     """持有自然日数(距最近一笔买入)。无法解析时返回大数,视为已过保护期(不阻断止损)。"""
@@ -1210,12 +1216,25 @@ def check_holdings(df: pd.DataFrame) -> list:
                     "建议": f"多头排列但已{tier}或量能异常，持有为主，不建议追加",
                 })
         elif cur_status == "▲ 接近支撑" and row.get("MA5拐头") == "↑":
-            alerts.append({
-                "基金": fund, "ETF": name, "级别": "🟢 加仓",
-                "信号变化": f"{buy_status} → {cur_status}",
-                "距MA50": dist_str, "风险等级": "低位",
-                "建议": "支撑位企稳，MA5拐头，可以再买一点 [低位]",
-            })
+            # 只在"缩量回踩低吸"形态才主动加仓(量比<1 且 现价回踩至MA5下方)。
+            # 回测: 该组合 D+5 胜率显著高于"仅MA5↑"，且要求价<MA5天然规避假拐头。
+            vol_ratio = float(row.get("量比", 0) or 0)
+            pullback = ma5 > 0 and price > 0 and price < ma5
+            shrink_vol = 0 < vol_ratio < ADD_VOL_RATIO_MAX
+            if pullback and shrink_vol:
+                alerts.append({
+                    "基金": fund, "ETF": name, "级别": "🟢 加仓",
+                    "信号变化": f"{buy_status} → {cur_status}",
+                    "距MA50": dist_str, "风险等级": "低位",
+                    "建议": "支撑位缩量回踩(量比<1且价回踩MA5)，可以再买一点 [低位]",
+                })
+            else:
+                alerts.append({
+                    "基金": fund, "ETF": name, "级别": "🔵 持有",
+                    "信号变化": f"{buy_status} → {cur_status}",
+                    "距MA50": dist_str,
+                    "建议": "接近支撑但未现缩量回踩，持有观望，等缩量回踩MA5再补",
+                })
         else:
             # ▲ 接近支撑(MA5↓) — 回调未企稳，持有观望
             alerts.append({

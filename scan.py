@@ -2131,7 +2131,7 @@ def notify_feishu(df: pd.DataFrame, counts: dict, compare_report: bool = False,
                         f"  观望为主{fund_str}"
                     )
                 else:
-                    lines.append(f"  {bucket_tag}{row['名称']}  距MA50 {row.get('距MA50','')}{agent_tag}")
+                    lines.append(f"  {bucket_tag}{row['名称']}  距MA50 {row.get('距MA50','')}{agent_tag}{fund_str}")
             elements.append({
                 "tag": "div",
                 "text": {"tag": "lark_md", "content": "\n".join(lines)},

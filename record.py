@@ -376,13 +376,15 @@ def show_records(dca: bool = False):
         direct_shares = r.get("份额")
         if direct_shares is not None and direct_shares > 0:
             shares = direct_shares
-        elif amt and amt > 0:
-            if nav and nav > 0:
-                shares = amt / nav
-            else:
-                shares = amt
-                holdings[fc].setdefault("nav_missing", True)
+        elif amt and amt > 0 and nav and nav > 0:
+            shares = amt / nav
         else:
+            # 净值缺失且无份额：无法可靠折算份额。
+            # 宁可不计入，也不用净值=1的假设污染加权成本与盈亏，
+            # 只登记为"待回填"，等 T+1 净值补齐后再纳入计算。
+            if amt and amt > 0:
+                holdings[fc]["pending_amount"] = holdings[fc].get("pending_amount", 0) + amt
+                holdings[fc]["pending_count"] = holdings[fc].get("pending_count", 0) + 1
             shares = 0
         if shares > 0:
             if typ == "卖出":
@@ -431,6 +433,10 @@ def show_records(dca: bool = False):
 
             print(f"    投入: {buy_amt:.0f}元 ({txn_label})  加权成本: {avg_cost:.4f}")
 
+            pend_amt = h.get("pending_amount", 0)
+            if pend_amt > 0:
+                print(f"    ⏳ 另有 {h.get('pending_count', 0)} 笔 {pend_amt:.0f}元 待回填净值，暂不计入成本/盈亏")
+
             if sell_amt > 0:
                 r_sign = "+" if realized >= 0 else ""
                 print(f"    已卖出: {sell_amt:.0f}元  已实现盈亏: {r_sign}{realized:.0f}元")
@@ -452,6 +458,7 @@ def show_records(dca: bool = False):
         else:
             # 已全部清仓：若有补齐的清仓盈亏则展示，否则无法计算
             rc = h.get("realized_clear")
+            pend_amt = h.get("pending_amount", 0)
             if rc is not None:
                 grand_realized += rc
                 r_sign = "+" if rc >= 0 else ""
@@ -460,6 +467,9 @@ def show_records(dca: bool = False):
                 pct_c = rc / cost_c * 100 if cost_c > 0 else 0
                 print(f"    ✅ 已清仓  投入{cost_c:.0f}元 → 回收{proc_c:.0f}元")
                 print(f"    已实现盈亏: {r_sign}{rc:.0f}元 ({pct_c:+.2f}%)")
+            elif pend_amt > 0:
+                # 仅有待回填买入(净值缺失)：如实说明，不做任何盈亏推算
+                print(f"    ⏳ {h.get('pending_count', 0)} 笔 {pend_amt:.0f}元 待回填净值，T+1 后自动纳入计算")
             else:
                 n = len(h["records"])
                 print(f"    共 {n} 笔 (无金额记录，无法计算)")

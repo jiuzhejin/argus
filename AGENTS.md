@@ -24,7 +24,6 @@
 
 可选参数：
 
-- `--detail`：显示完整指标列
 - `--refresh`：强制刷新缓存
 - `--no-cache`：不使用缓存，直接拉取实时数据
 - `--no-xhs`：盘中模式下不生成小红书日志
@@ -71,7 +70,6 @@
 - `code <CODE>` 或直接输入 6 位代码：执行单只 ETF 分析，并带 `--code <CODE> --no-cache`
 - `morning`：执行早盘分析
 - `compare`：执行盘后对比
-- `detail`：扫描时带 `--detail`
 - `refresh`：扫描时带 `--refresh`
 - `record buy <CODE> <DATE> [TIME]`：记录买入
 - `record list`：查看买入记录

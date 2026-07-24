@@ -15,8 +15,7 @@ Argus - ETF 均线信号扫描器
   □ 多头排列：趋势健康，持有为主
 
 用法:
-  .venv/bin/python scan.py              # 扫描全部
-  .venv/bin/python scan.py --detail     # 显示详细指标
+  .venv/bin/python scan.py              # 扫描全部(显示完整指标)
   .venv/bin/python scan.py --refresh    # 强制刷新缓存
   .venv/bin/python scan.py --no-xhs     # 不生成小红书日志(盘中模式)
   .venv/bin/python scan.py --compare    # 与盘中快照对比(盘后模式)
@@ -1449,7 +1448,6 @@ def _render_dca(win, items):
 
 def main():
     parser = argparse.ArgumentParser(description="Argus ETF 均线信号扫描器")
-    parser.add_argument("--detail", action="store_true", help="显示完整指标列")
     parser.add_argument("--refresh", action="store_true", help="强制刷新缓存")
     parser.add_argument("--no-xhs", action="store_true", help="不生成小红书日志(盘中模式)")
     parser.add_argument("--compare", action="store_true", help="与盘中快照对比(盘后模式)")
@@ -1558,13 +1556,11 @@ def main():
         show_cols = ["池子", "代码", "名称", "现价", "昨收", "开盘涨跌", "早盘涨跌", "早盘量能",
                      "距MA50", "量比", "MA5拐头", "状态", *agent_cols,
                      "多头入场", "突破", "试探", "临界原因", "信号评估", "场外基金"]
-    elif args.detail:
+    else:
+        # 盘中/盘后统一显示完整指标列(原 --detail，现已设为默认)。
         show_cols = ["池子", "代码", "名称", "现价", "MA5", "MA10", "MA20", "MA50", "MA100",
                      "距MA50", "量比", "回踩MA50", "MA5拐头", "状态", *agent_cols,
                      "多头入场", "突破", "试探", "临界原因", "风险等级", "信号评估", "场外基金"]
-    else:
-        show_cols = ["池子", "代码", "名称", "现价", "距MA50", "量比", "MA5拐头", "状态",
-                     *agent_cols, "多头入场", "突破", "试探", "临界原因", "风险等级", "信号评估", "场外基金"]
 
     valid_cols = [c for c in show_cols if c in df.columns]
 

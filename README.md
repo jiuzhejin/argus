@@ -40,12 +40,6 @@ Argus 是一个 ETF 均线信号扫描器，用来做 ETF 池扫描、单只 ETF
 .venv/bin/python scan.py
 ```
 
-查看详细指标：
-
-```bash
-.venv/bin/python scan.py --detail
-```
-
 强制刷新缓存后扫描：
 
 ```bash

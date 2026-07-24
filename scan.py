@@ -17,7 +17,6 @@ Argus - ETF 均线信号扫描器
 用法:
   .venv/bin/python scan.py              # 扫描全部(显示完整指标)
   .venv/bin/python scan.py --refresh    # 强制刷新缓存
-  .venv/bin/python scan.py --no-xhs     # 不生成小红书日志(盘中模式)
   .venv/bin/python scan.py --morning    # 早盘分析(实时数据，不缓存)
   .venv/bin/python scan.py --code 512480 # 查询单只ETF的分析信息
 """
@@ -1388,8 +1387,8 @@ def dca_advice():
     return win, items
 
 
-def _dca_lines(win, items, mask_amount=False):
-    """渲染定投模块文本行。mask_amount=True 隐藏金额(小红书脱敏)。"""
+def _dca_lines(win, items):
+    """渲染定投模块文本行。"""
     if not items:
         return []
     marks = {"done": "✅已投", "buy": "🟢可投", "deadline": "🔔必投",
@@ -1404,10 +1403,7 @@ def _dca_lines(win, items, mask_amount=False):
             lines.append(f"  现价{m['现价']} | 分位{m['分位']}% | 距MA20 {m['距MA20']:+.1f}% | 趋势:{m['趋势']}")
             if it.get("parts"):
                 lines.append(f"  评分 {it['score']}/100 ({' '.join(it['parts'])}) | 触发线{it['threshold']}")
-        adv = it["advice"]
-        if mask_amount:
-            adv = adv.replace(f" {it['amount']}元", "")
-        lines.append(f"  → {adv}")
+        lines.append(f"  → {it['advice']}")
     return lines
 
 
@@ -1424,7 +1420,6 @@ def _render_dca(win, items):
 def main():
     parser = argparse.ArgumentParser(description="Argus ETF 均线信号扫描器")
     parser.add_argument("--refresh", action="store_true", help="强制刷新缓存")
-    parser.add_argument("--no-xhs", action="store_true", help="不生成小红书日志(盘中模式)")
     parser.add_argument("--morning", action="store_true", help="早盘分析(实时数据，不缓存)")
     parser.add_argument("--llm", action="store_true", help="调用 etf-agent CLI 做二次判断（默认关闭）")
     parser.add_argument("--code", metavar="CODE", help="查询单只ETF的分析信息(股票代码)")
@@ -1639,11 +1634,6 @@ def main():
     dca_win, dca_items = dca_advice()
     _render_dca(dca_win, dca_items)
 
-    # ===== 小红书格式日志 =====
-    if not args.no_xhs and not args.morning:
-        save_xhs_log(df, counts, holding_alerts=alerts,
-                     dca=(dca_win, dca_items))
-
     # ===== 飞书推送 =====
     notify_feishu(df, counts, holding_alerts=alerts,
                   morning=args.morning, dca=(dca_win, dca_items))
@@ -1656,213 +1646,6 @@ def main():
     log_path = LOG_DIR / f"scan_{date_tag}{suffix}.log"
     log_path.write_text(log_buf.getvalue(), encoding="utf-8")
     print(f"  📝 日志已保存: {log_path.name}")
-
-
-def save_xhs_log(df: pd.DataFrame, counts: dict, holding_alerts: list = None,
-                 dca: tuple = None):
-    """生成小红书风格的扫描日志"""
-    today = datetime.now().strftime("%m-%d")
-    today_full = datetime.now().strftime("%Y-%m-%d")
-    ok = sum(counts.values())
-    total = len(df)
-
-    lines = []
-
-    # 标题
-    buy_count = counts["★ 低位确认"] + counts["◆ 趋势跟随"]
-    time_tag = "盘中信号" if _is_trading_hours() else "盘后复盘"
-    if buy_count > 0:
-        lines.append(f"🚨 今日ETF扫描｜{buy_count}只出买入信号！速看 {today}")
-    else:
-        lines.append(f"📊 今日ETF扫描｜{today} {time_tag}")
-    lines.append("")
-
-    # 概览
-    lines.append(f"🔭 Argus 扫描了 {total} 只ETF，成功 {ok} 只")
-    lines.append("")
-    lines.append("📋 信号分布：")
-    lines.append(f"★ 低位确认：{counts['★ 低位确认']} 只")
-    lines.append(f"◆ 趋势跟随：{counts['◆ 趋势跟随']} 只")
-    lines.append(f"◇ 转强初期：{counts['◇ 转强初期']} 只")
-    lines.append(f"▲ 接近支撑：{counts['▲ 接近支撑']} 只")
-
-    lines.append(f"□ 多头排列：{counts['□ 多头排列']} 只")
-    lines.append(f"- 趋势完好：{counts['- 趋势完好']} 只")
-    lines.append(f"◈ 临界观察：{counts['◈ 临界观察']} 只")
-    lines.append(f"✗ 趋势偏弱：{counts['✗ 趋势偏弱']} 只")
-    lines.append("")
-    if "池子key" in df.columns:
-        lines.append("🎯 池子分层：")
-        for bucket in ("core", "watch", "dca"):
-            group = df[df["池子key"] == bucket]
-            if group.empty:
-                continue
-            buy_n = int(group["状态"].isin(["★ 低位确认", "◆ 趋势跟随", "◇ 转强初期"]).sum())
-            strong_n = int(group["状态"].isin(["★ 低位确认", "◆ 趋势跟随", "◇ 转强初期", "□ 多头排列", "- 趋势完好"]).sum())
-            crit_n = int((group["状态"] == "◈ 临界观察").sum())
-            weak_n = int((group["状态"] == "✗ 趋势偏弱").sum())
-            crit_str = f"｜临界{crit_n}" if crit_n else ""
-            lines.append(f"{ETF_BUCKET_LABELS.get(bucket, bucket)}：{len(group)}只｜可参与{buy_n}｜走强/完好{strong_n}{crit_str}｜偏弱{weak_n}")
-        lines.append("")
-
-    # 买入信号详情
-    buy = df[df["状态"] == "★ 低位确认"]
-    if not buy.empty:
-        lines.append("—" * 20)
-        lines.append("🔥 低位确认：")
-        lines.append("")
-        for _, row in buy.iterrows():
-            assess = row.get("信号评估", "")
-            otc = row.get("场外基金", "")
-            level = assess.split("|")[0] if assess else ""
-            reason = assess.split("|")[1] if "|" in assess else ""
-            tier = row.get("风险等级", "")
-            tier_tag = f" [{tier}]" if tier else ""
-            lines.append(f"💰 {row['名称']}（{row['代码']}）{tier_tag}")
-            lines.append(f"   现价 {row.get('现价','')} ｜距MA50 {row.get('距MA50','')} ｜量比 {row.get('量比','')}")
-            lines.append(f"   MA5拐头{row.get('MA5拐头','')} ｜回踩MA50: {row.get('回踩MA50','')}")
-            lines.append(f"   信号评估: {level}（{reason}）")
-            if row.get("Agent空仓") or row.get("Agent持有"):
-                lines.append(f"   🤖 Agent: 空仓{row.get('Agent空仓','?')} ｜ 持有{row.get('Agent持有','?')}")
-                if row.get("Agent理由"):
-                    lines.append(f"   综合理由: {row.get('Agent理由','')}")
-            if otc:
-                lines.append(f"   👉 场外基金: {otc}")
-            lines.append("")
-
-    # 趋势跟随（非最佳低位，但技术面已可继续少量参与）
-    hold = df[df["状态"] == "◆ 趋势跟随"]
-    if not hold.empty:
-        lines.append("—" * 20)
-        lines.append("◆ 趋势跟随（趋势延续型买点，可继续少量参与，已有持仓继续拿）：")
-        for _, row in hold.iterrows():
-            tier = row.get("风险等级", "")
-            tier_tag = f" [{tier}]" if tier else ""
-            agent_tag = ""
-            if row.get("Agent空仓") or row.get("Agent持有"):
-                agent_tag = f" ｜Agent 空仓{row.get('Agent空仓','?')}/持有{row.get('Agent持有','?')}"
-            lines.append(f"   ◆ {row['名称']} {row.get('现价','')} ｜距MA50 {row.get('距MA50','')}{tier_tag}{agent_tag}")
-        lines.append("")
-
-    learn = df[df["状态"] == "◇ 转强初期"]
-    if not learn.empty:
-        lines.append("—" * 20)
-        lines.append("◇ 转强初期（短线转强，但中期趋势还没确认，可先买一点看看）：")
-        for _, row in learn.iterrows():
-            tier = row.get("风险等级", "")
-            tier_tag = f" [{tier}]" if tier else ""
-            agent_tag = ""
-            if row.get("Agent空仓") or row.get("Agent持有"):
-                agent_tag = f" ｜Agent 空仓{row.get('Agent空仓','?')}/持有{row.get('Agent持有','?')}"
-            lines.append(f"   ◇ {row['名称']} {row.get('现价','')} ｜距MA50 {row.get('距MA50','')}{tier_tag}{agent_tag}")
-        lines.append("")
-
-    # 接近支撑
-    support = df[df["状态"] == "▲ 接近支撑"]
-    if not support.empty:
-        lines.append("—" * 20)
-        lines.append("⚡ 接近支撑（关注反弹机会）：")
-        for _, row in support.iterrows():
-            agent_tag = ""
-            if row.get("Agent空仓") or row.get("Agent持有"):
-                agent_tag = f" ｜Agent 空仓{row.get('Agent空仓','?')}/持有{row.get('Agent持有','?')}"
-            lines.append(f"   ▲ {row['名称']} {row.get('现价','')} ｜距MA50 {row.get('距MA50','')}{agent_tag}")
-        lines.append("")
-
-    # 突破提醒
-    if "突破" in df.columns:
-        breakout_df = df[df["突破"].astype(str).str.len() > 0]
-        if not breakout_df.empty:
-            lines.append("—" * 20)
-            lines.append("⬆ MA50突破提醒（近期从弱转强）：")
-            for _, row in breakout_df.iterrows():
-                lines.append(f"   ⬆ {row['名称']} {row.get('现价','')} ｜距MA50 {row.get('距MA50','')} ｜{row['突破']}")
-            lines.append("")
-
-    # 多头排列
-    bull = df[df["状态"] == "□ 多头排列"]
-    if not bull.empty:
-        lines.append("—" * 20)
-        lines.append("💪 多头排列（趋势健康，持有为主）：")
-        for _, row in bull.iterrows():
-            entry_ok = str(row.get("多头入场", "")) == "是"
-            entry_tag = "  ◎ 可先买一点" if entry_ok else ""
-            lines.append(f"   □ {row['名称']} {row.get('现价','')} ｜距MA50 {row.get('距MA50','')}{entry_tag}")
-        lines.append("")
-
-    # 趋势完好
-    good = df[df["状态"] == "- 趋势完好"]
-    if not good.empty:
-        lines.append("👍 趋势完好：")
-        for _, row in good.iterrows():
-            lines.append(f"   - {row['名称']} {row.get('现价','')} ｜距MA50 {row.get('距MA50','')}")
-        lines.append("")
-
-    # 临界观察
-    crit = df[df["状态"] == "◈ 临界观察"]
-    if not crit.empty:
-        lines.append("—" * 20)
-        lines.append("◈ 临界观察（结构接近转强，只差一步确认，未确认别追）：")
-        for _, row in crit.iterrows():
-            reason = row.get("临界原因", "")
-            reason_tag = f" ｜{reason}" if reason else ""
-            lines.append(f"   ◈ {row['名称']} {row.get('现价','')} ｜距MA50 {row.get('距MA50','')}{reason_tag}")
-        lines.append("")
-
-    # 趋势偏弱
-    weak = df[df["状态"] == "✗ 趋势偏弱"]
-    if not weak.empty:
-        lines.append("—" * 20)
-        lines.append("📉 趋势偏弱（暂时回避）：")
-        for _, row in weak.iterrows():
-            lines.append(f"   ✗ {row['名称']} {row.get('现价','')} ｜距MA50 {row.get('距MA50','')}")
-        lines.append("")
-
-    # 异常
-    errors = df[~df["状态"].isin([s for s in STATUS_ORDER])]
-    if not errors.empty:
-        lines.append(f"⚠️ 数据异常 {len(errors)} 只：" + "、".join(errors["名称"].tolist()))
-        lines.append("")
-
-    # 持仓监控
-    if holding_alerts:
-        lines.append("—" * 20)
-        lines.append(f"📊 持仓监控（{len(holding_alerts)} 只）：")
-        lines.append("")
-        for a in holding_alerts:
-            lines.append(f"   {a['级别']} {a['ETF']}（{a['基金']}）")
-            lines.append(f"     {a['信号变化']}  距MA50 {a['距MA50']}")
-            lines.append(f"     → {a['建议']}")
-            if a.get("Agent持有"):
-                lines.append(f"     🤖 Agent 综合: {a['Agent持有']}"
-                             + (f" ｜{a['Agent理由']}" if a.get("Agent理由") else ""))
-        lines.append("")
-
-    # 定投模块(脱敏：不显示金额)
-    if dca and dca[1]:
-        lines.append("—" * 20)
-        lines.append("💰 定投模块：")
-        lines.extend(_dca_lines(dca[0], dca[1], mask_amount=True))
-        lines.append("")
-
-    # 尾部
-    lines.append("—" * 20)
-    lines.append("📌 信号说明：")
-    lines.append("★ 低位确认：回踩MA50确认+放量站回短期均线+MA5拐头")
-    lines.append("◇ 转强初期：短线转强但仍在MA50/MA100下方，可先买一点看看")
-    lines.append("◆ 趋势跟随：右侧跟随或强势反转早期，可继续少量参与")
-    lines.append("◈ 临界观察：结构接近转强但差一步确认，只盯不追")
-    lines.append("□ 价格在所有均线之上，趋势健康")
-    lines.append("⚠️ 仅供参考，不构成投资建议")
-    lines.append("")
-    lines.append(f"#ETF #基金定投 #A股 #技术分析 #{today_full}")
-
-    # 写入文件
-    LOG_DIR.mkdir(exist_ok=True)
-    date_tag = datetime.now().strftime("%Y%m%d")
-    log_path = LOG_DIR / f"scan_{date_tag}_xhs.txt"
-    log_path.write_text("\n".join(lines), encoding="utf-8")
-    print(f"  📕 小红书日志已保存: {log_path.name}")
 
 
 def notify_feishu(df: pd.DataFrame, counts: dict,
